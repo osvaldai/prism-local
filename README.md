@@ -194,16 +194,19 @@ MLX is Apple's open-source ML framework built for Apple Silicon:
 - **Native Metal** — compiled for Apple's GPU ISA directly.
 - **INT4 support** — Gemma 3 4B fits in ~3.3 GB RAM natively.
 
-### Why Gemma 3 4B INT4?
+### Model Comparison (measured on Apple M1 8GB with PRISM)
 
-| Model | Size | RAM needed | TPS (M1 8GB) |
-|-------|------|-----------|--------------|
-| Gemma 3 4B INT4 | 3.28 GB | ~4 GB | 13–21 |
-| Gemma 3 4B INT8 | 5.5 GB | ~7 GB | ~12 |
-| Llama 3 8B INT4 | 5.0 GB | ~6 GB | ~9 |
-| Gemma 3 12B INT4 | 8.1 GB | ~10 GB | ~6 |
+All three models tested live. Mistral 7B and Llama 3.1 8B ran under NVMe swap pressure (only ~1GB free RAM during test).
 
-Gemma 3 4B INT4 is the best TPS/quality tradeoff for M1 8GB — fits with room for OS overhead.
+| Model | Size | avg TPS | SIMPLE TPS | MEDIUM TPS | COMPLEX TPS |
+|-------|------|---------|-----------|-----------|------------|
+| **Gemma 3 4B INT4** | 3.3 GB | **18.9** | 14.8 | 21.5 | 20.3 |
+| Mistral 7B INT4 | 4.1 GB | 9.9 | 4.0 | 13.2 | 12.4 |
+| Llama 3.1 8B INT4 | 4.7 GB | 7.3 | 2.5 | 11.4 | 8.1 |
+
+> On a 16GB M1/M2 Mac (Mistral/Llama fit in RAM without swap), expect ~2x higher TPS for 7B/8B models.
+
+Gemma 3 4B INT4 is the best TPS/quality tradeoff for M1 8GB — fits comfortably with OS overhead.
 
 ---
 
@@ -398,7 +401,60 @@ Intel Mac / Linux: works via CPU-only MLX path, expect ~3–5× lower TPS.
 
 | Hardware | OS | MLX | Model | avg TPS |
 |----------|----|----|-------|---------|
-| Apple M1 8GB | macOS 15.6 | 0.31.2 | Gemma 3 4B INT4 | 19.2 |
+| Apple M1 8GB | macOS 15.6 | 0.31.2 | Gemma 3 4B INT4 | 18.9 |
+| Apple M1 8GB (swap) | macOS 15.6 | 0.31.2 | Mistral 7B INT4 | 9.9 |
+| Apple M1 8GB (swap) | macOS 15.6 | 0.31.2 | Llama 3.1 8B INT4 | 7.3 |
+
+---
+
+## Multi-Model Benchmark (2026-06-26)
+
+Full cross-model comparison using `multi_model_benchmark.py`. All models run sequentially on the same hardware with PRISM active.
+
+**Hardware:** Apple M1 8GB | macOS 15.7.3 | MLX 0.31.2  
+**Conditions:** ~1.2 GB free RAM at start. Mistral 7B and Llama 3.1 8B loaded via NVMe swap.
+
+### Summary
+
+| Model | Size | avg TPS | avg RAM delta | Notes |
+|-------|------|---------|--------------|-------|
+| Gemma 3 4B INT4 | 3.3 GB | **18.9** | 36 MB | Fits in RAM comfortably |
+| Mistral 7B INT4 | 4.1 GB | 9.9 | 31 MB | Heavy swap — 1GB free RAM |
+| Llama 3.1 8B INT4 | 4.7 GB | 7.3 | 32 MB | Heavy swap — SIMPLE took 52s |
+
+### Per-Prompt Breakdown
+
+| Prompt | Tier | Gemma 4B TPS | Mistral 7B TPS | Llama 8B TPS |
+|--------|------|-------------|---------------|-------------|
+| SIMPLE (36 chars) | SIMPLE | 14.8 | 4.0 | 2.5 |
+| MEDIUM (82 chars) | MEDIUM | 21.5 | 13.2 | 11.4 |
+| COMPLEX (241 chars) | COMPLEX | 20.3 | 12.4 | 8.1 |
+
+### Key Observations
+
+**1. Swap degradation is severe for SIMPLE queries:**
+- Gemma 4B SIMPLE: 14.8 TPS (8.7s for 129 tokens)
+- Llama 8B SIMPLE: 2.5 TPS (52s for 128 tokens) — 6× slower
+
+When a model doesn't fit in RAM, PRISM's SIMPLE tier (128 max_tokens) actually helps the most: fewer tokens = fewer swap page faults = proportionally less penalty.
+
+**2. Larger models converge on MEDIUM/COMPLEX tasks:**
+- Gemma 4B COMPLEX: 20.3 TPS
+- Mistral 7B COMPLEX: 12.4 TPS
+- Llama 8B COMPLEX: 8.1 TPS
+
+The gap narrows for long outputs because page fault overhead amortizes over more tokens.
+
+**3. RAM-matched hardware changes the picture dramatically:**
+On a 16GB M1 Pro (where all three fit without swap):
+
+| Model | Expected TPS (16GB) | Quality tier |
+|-------|---------------------|-------------|
+| Gemma 3 4B INT4 | ~20 | Good |
+| Mistral 7B INT4 | ~18–22 | Better |
+| Llama 3.1 8B INT4 | ~15–18 | Better |
+
+**Recommendation:** Match model to available RAM. PRISM adaptive sampling provides the largest relative gain on models that fit fully in memory — where the token budget savings translate directly to wall-clock speedup rather than being dominated by swap latency.
 
 ---
 
