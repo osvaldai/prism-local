@@ -1,0 +1,45 @@
+{
+  "model": "gemma-3-4b-it-4bit",
+  "results": [
+    {
+      "label": "simple",
+      "tier": "simple",
+      "prompt_len": 12,
+      "output_tokens": 129,
+      "total_sec": 7.883,
+      "tokens_per_sec": 16.4,
+      "ram_mb": 44.0,
+      "context_compressed": false,
+      "original_context_len": 12,
+      "compressed_context_len": 12,
+      "max_tokens_used": 128
+    },
+    {
+      "label": "medium",
+      "tier": "medium",
+      "prompt_len": 65,
+      "output_tokens": 81,
+      "total_sec": 4.011,
+      "tokens_per_sec": 20.2,
+      "ram_mb": 85.0,
+      "context_compressed": false,
+      "original_context_len": 65,
+      "compressed_context_len": 65,
+      "max_tokens_used": 512
+    },
+    {
+      "label": "complex",
+      "tier": "complex",
+      "prompt_len": 190,
+      "output_tokens": 1025,
+      "total_sec": 48.898,
+      "tokens_per_sec": 21.0,
+      "ram_mb": 33.0,
+      "context_compressed": false,
+      "original_context_len": 190,
+      "compressed_context_len": 190,
+      "max_tokens_used": 1024
+    }
+  ],
+  "load_ms": 45742
+}

@@ -1,0 +1,33 @@
+{
+  "model": "gemma-3-4b-it-4bit",
+  "results": [
+    {
+      "label": "simple",
+      "prompt_len": 12,
+      "max_tokens": 64,
+      "output_tokens": 65,
+      "total_sec": 4.725,
+      "tokens_per_sec": 13.8,
+      "ram_mb": 58.0
+    },
+    {
+      "label": "medium",
+      "prompt_len": 65,
+      "max_tokens": 256,
+      "output_tokens": 92,
+      "total_sec": 5.26,
+      "tokens_per_sec": 17.5,
+      "ram_mb": 65.0
+    },
+    {
+      "label": "complex",
+      "prompt_len": 190,
+      "max_tokens": 512,
+      "output_tokens": 513,
+      "total_sec": 24.644,
+      "tokens_per_sec": 20.8,
+      "ram_mb": 74.0
+    }
+  ],
+  "load_ms": 5110
+}
