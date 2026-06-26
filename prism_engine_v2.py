@@ -11,7 +11,6 @@ Major improvements over v1:
   - Prefix KV-cache hint      (hash system_prompt to skip re-encoding)
 """
 import gc
-import hashlib
 import math
 import re
 import time
@@ -414,7 +413,6 @@ class PRISMEngineV2:
         self.draft_model = draft_model
         self.draft_tokenizer = draft_tokenizer
         self.speculative_lookahead = speculative_lookahead
-        self.kv_cache = KVCacheManager()
         self._apply_metal_budget()
         self._warmup()
 
@@ -524,8 +522,10 @@ class PRISMEngineV2:
         ttft = 0.0
 
         _STOP = ["<|eot_id|>", "<end_of_turn>", "<|im_end|>", "</s>", "<|endoftext|>"]
-        _REP_WINDOW = 60   # chars to check for repetition
-        _REP_MIN_OUT = 200 # don't check until output is this long
+        _REP_WINDOW  = 60   # chars to check for repetition
+        _REP_MIN_OUT = 200  # don't check until output is this long
+        _total_len   = 0
+        _tail_buf    = ""
 
         # Speculative decoding fires on MEDIUM/COMPLEX (longer output = bigger speedup)
         if self.draft_model is not None and tier != Tier.SIMPLE:
@@ -563,11 +563,14 @@ class PRISMEngineV2:
                         break
                     output_parts.append(chunk)
                     yield chunk, None
-                    # Repetition early-stop: if last 60 chars appear 2+ times → bail
-                    out_so_far = "".join(output_parts)
-                    if len(out_so_far) > _REP_MIN_OUT:
-                        tail = out_so_far[-_REP_WINDOW:]
-                        if out_so_far[:-_REP_WINDOW].count(tail) >= 2:
+                    # Repetition early-stop — O(1) tail check using running length
+                    _total_len += len(chunk)
+                    if _total_len > _REP_MIN_OUT:
+                        _tail_buf += chunk
+                        if len(_tail_buf) > _REP_WINDOW * 3:
+                            _tail_buf = _tail_buf[-_REP_WINDOW * 3:]
+                        tail = _tail_buf[-_REP_WINDOW:]
+                        if len(tail) == _REP_WINDOW and _tail_buf[:-_REP_WINDOW].count(tail) >= 2:
                             break
                 streaming_ok = True
             except Exception:

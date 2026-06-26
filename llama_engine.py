@@ -183,26 +183,35 @@ class LlamaEngine:
     # ── Streaming generate ────────────────────────────────────────────────────
 
     def generate_stream(
-        self, prompt: str, system_prompt: str = ""
+        self,
+        prompt: str,
+        system_prompt: str = "",
+        history: "list[dict] | None" = None,
     ) -> Generator[tuple[str, Optional[PRISMResult]], None, None]:
         tier = classify_complexity(prompt)
-        params = _dynamic_budget(prompt, tier)
+        live_free_ram = psutil.virtual_memory().available / 1024**3
+        params = _dynamic_budget(prompt, tier, free_ram_gb=live_free_ram)
 
-        # Compress only the USER prompt — system_prompt is added via _format_prompt
-        # (avoids double injection: system_prompt must NOT be included in compress_context input)
         original_len = len(prompt)
-        compressed_prompt = compress_context(prompt, self.config.n_ctx * 3, query=prompt)
+        ctx_limit = self.config.n_ctx * 3
+        compressed_prompt = compress_context(prompt, ctx_limit // 2, query=prompt)
         compressed_len = len(compressed_prompt)
 
-        formatted = self._format_prompt(compressed_prompt, system_prompt)
+        # Build history-aware formatted prompt
+        formatted = self._format_prompt_with_history(compressed_prompt, system_prompt, history)
 
         proc = psutil.Process()
+        peak_rss = proc.memory_info().rss
         gc.collect()
         t0 = time.perf_counter()
+        ttft = 0.0
         parts: list[str] = []
+        first_tok = True
 
         stop_tokens = ["<|eot_id|>", "<end_of_turn>", "[/INST]", "</s>",
                        "<|im_end|>", "<|endoftext|>"]
+        _rep_buf = ""
+        _total_len = 0
         try:
             for chunk in self._llm(
                 formatted,
@@ -214,15 +223,29 @@ class LlamaEngine:
                 stop=stop_tokens,
             ):
                 tok = chunk["choices"][0]["text"]
+                if first_tok and tok:
+                    ttft = time.perf_counter() - t0
+                    first_tok = False
+                cur_rss = proc.memory_info().rss
+                if cur_rss > peak_rss:
+                    peak_rss = cur_rss
                 parts.append(tok)
                 yield tok, None
+                # Repetition early-stop
+                _total_len += len(tok)
+                if _total_len > 200:
+                    _rep_buf += tok
+                    if len(_rep_buf) > 180:
+                        _rep_buf = _rep_buf[-180:]
+                    tail = _rep_buf[-60:]
+                    if len(tail) == 60 and _rep_buf[:-60].count(tail) >= 2:
+                        break
         except Exception as e:
             yield f"\n[LlamaEngine error: {e}]", None
 
         output = "".join(parts)
         elapsed = time.perf_counter() - t0
         ram_mb = proc.memory_info().rss / 1024**2
-        # llama.cpp doesn't expose token count easily in stream mode; estimate
         n_tokens = max(len(output.split()) * 4 // 3, 1)
         tps = n_tokens / elapsed if elapsed > 0 else 0
 
@@ -233,11 +256,57 @@ class LlamaEngine:
             total_sec=round(elapsed, 3),
             tokens_per_sec=round(tps, 1),
             ram_mb=round(ram_mb, 0),
+            peak_ram_mb=round(peak_rss / 1024**2, 0),
+            ttft_sec=round(ttft, 3),
             context_compressed=(compressed_len < original_len),
             original_context_len=original_len,
             compressed_context_len=compressed_len,
             params=params,
         )
+
+    def _format_prompt_with_history(
+        self, text: str, system_prompt: str = "", history: "list[dict] | None" = None
+    ) -> str:
+        name = Path(self.model_path).name.lower()
+        sys = system_prompt or "You are a helpful assistant."
+        turns = history or []
+
+        if "llama-3" in name or "llama3" in name:
+            parts = [f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{sys}<|eot_id|>"]
+            for t in turns:
+                role = "user" if t["role"] == "user" else "assistant"
+                parts.append(f"<|start_header_id|>{role}<|end_header_id|>\n{t['content']}<|eot_id|>")
+            parts.append(f"<|start_header_id|>user<|end_header_id|>\n{text}<|eot_id|>")
+            parts.append("<|start_header_id|>assistant<|end_header_id|>\n")
+            return "".join(parts)
+
+        if "gemma" in name:
+            parts = [f"<start_of_turn>system\n{sys}<end_of_turn>\n"]
+            for t in turns:
+                role = "user" if t["role"] == "user" else "model"
+                parts.append(f"<start_of_turn>{role}\n{t['content']}<end_of_turn>\n")
+            parts.append(f"<start_of_turn>user\n{text}<end_of_turn>\n<start_of_turn>model\n")
+            return "".join(parts)
+
+        if "mistral" in name or "mixtral" in name:
+            conv = "".join(
+                f"[INST] {t['content']} [/INST] " if t["role"] == "user"
+                else f"{t['content']} "
+                for t in turns
+            )
+            return f"[INST] {sys}\n\n{conv}{text} [/INST]"
+
+        if "qwen" in name:
+            parts = [f"<|im_start|>system\n{sys}<|im_end|>\n"]
+            for t in turns:
+                parts.append(f"<|im_start|>{t['role']}\n{t['content']}<|im_end|>\n")
+            parts.append(f"<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n")
+            return "".join(parts)
+
+        conv = "".join(
+            f"{'User' if t['role']=='user' else 'Assistant'}: {t['content']}\n" for t in turns
+        )
+        return f"System: {sys}\n\n{conv}User: {text}\nAssistant:"
 
     def _format_prompt(self, text: str, system_prompt: str = "") -> str:
         name = Path(self.model_path).name.lower()

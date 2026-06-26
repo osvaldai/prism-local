@@ -57,6 +57,8 @@ _SPARK = "▁▂▃▄▅▆▇█"
 
 # ─── App state ───────────────────────────────────────────────────────────────
 
+_HISTORY_MAX_TURNS = 40  # cap at 20 user+assistant pairs to prevent memory growth
+
 @dataclass
 class _State:
     engine: object = None
@@ -65,6 +67,12 @@ class _State:
     last_result: Optional[PRISMResult] = None
     history: list[dict] = field(default_factory=list)
     tps_history: deque = field(default_factory=lambda: deque(maxlen=10))
+
+    def append_history(self, role: str, content: str):
+        self.history.append({"role": role, "content": content})
+        if len(self.history) > _HISTORY_MAX_TURNS:
+            # Drop oldest pair (user+assistant) keeping system structure intact
+            self.history = self.history[-_HISTORY_MAX_TURNS:]
 
 
 _S = _State()
@@ -490,7 +498,7 @@ class PRISMApp(App):
 
         self._set_busy(True)
         self.query_one("#metrics-panel", MetricsWidget).show_generating()
-        _S.history.append({"role": "user", "content": prompt})
+        _S.append_history("user", prompt)
         self._log_user(prompt)
         self._log_assistant_start()
 
@@ -524,7 +532,7 @@ class PRISMApp(App):
 
             if final:
                 _S.last_result = final
-                _S.history.append({"role": "assistant", "content": "".join(parts)})
+                _S.append_history("assistant", "".join(parts))
                 self.call_from_thread(self._log_done, final)
                 # Use update_metrics (not update) to avoid Widget.update() conflict
                 self.call_from_thread(
