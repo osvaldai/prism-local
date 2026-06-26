@@ -203,14 +203,17 @@ class MetricsWidget(Widget):
         yield Static("", id="m-tps")
         yield Static("", id="m-tokens")
         yield Static("", id="m-time")
+        yield Static("", id="m-ttft")
         yield Static("", id="m-ram")
+        yield Static("", id="m-peak")
         yield Static("", id="m-compress")
         yield Static("", id="m-spec")
         yield Static("", id="m-spark")
 
     def idle(self):
         self.query_one("#tier-badge", Static).update("[#6e7681 italic]awaiting query…[/]")
-        for wid in ("m-tps", "m-tokens", "m-time", "m-ram", "m-compress", "m-spec", "m-spark"):
+        for wid in ("m-tps", "m-tokens", "m-time", "m-ttft", "m-ram", "m-peak",
+                    "m-compress", "m-spec", "m-spark"):
             self.query_one(f"#{wid}", Static).update("")
 
     def show_generating(self):
@@ -230,8 +233,18 @@ class MetricsWidget(Widget):
         self.query_one("#m-tokens", Static).update(f"[#8b949e]Tokens   [/][#58a6ff]{r.tokens_generated}[/]")
         self.query_one("#m-time",   Static).update(f"[#8b949e]Time     [/][#58a6ff]{r.total_sec}s[/]")
 
+        ttft_c = "#3fb950" if r.ttft_sec < 0.5 else ("#e3b341" if r.ttft_sec < 2.0 else "#f85149")
+        self.query_one("#m-ttft", Static).update(
+            f"[#8b949e]TTFT     [/][{ttft_c}]{r.ttft_sec}s[/]"
+        )
+
         ram_c = "#3fb950" if r.ram_mb < 500 else ("#e3b341" if r.ram_mb < 1500 else "#f85149")
         self.query_one("#m-ram", Static).update(f"[#8b949e]RAM      [/][{ram_c}]{r.ram_mb:.0f}MB[/]")
+
+        peak_c = "#3fb950" if r.peak_ram_mb < 800 else ("#e3b341" if r.peak_ram_mb < 2000 else "#f85149")
+        self.query_one("#m-peak", Static).update(
+            f"[#8b949e]PeakRAM  [/][{peak_c}]{r.peak_ram_mb:.0f}MB[/]"
+        )
 
         if r.context_compressed:
             pct = round((1 - r.compressed_context_len / max(r.original_context_len, 1)) * 100)
@@ -484,12 +497,24 @@ class PRISMApp(App):
         try:
             parts: list[str] = []
             final: Optional[PRISMResult] = None
+            # prior_history excludes current user turn (last item just appended in _send)
+            prior_history = _S.history[:-1]
+            # Batch tokens → send to UI every 8 tokens to reduce thread-switch overhead
+            _batch: list[str] = []
 
-            for tok, meta in _S.engine.generate_stream(prompt, sys_p):
+            def _flush_batch():
+                if _batch:
+                    self.call_from_thread(self._log_token, "".join(_batch))
+                    _batch.clear()
+
+            for tok, meta in _S.engine.generate_stream(prompt, sys_p, history=prior_history):
                 if meta is None:
                     parts.append(tok)
-                    self.call_from_thread(self._log_token, tok)
+                    _batch.append(tok)
+                    if len(_batch) >= 8:
+                        _flush_batch()
                 else:
+                    _flush_batch()
                     final = meta
 
             if final:

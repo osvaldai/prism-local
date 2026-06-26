@@ -142,7 +142,12 @@ def _dynamic_budget(text: str, tier: Tier, free_ram_gb: float = 99.0) -> Samplin
 _STOPWORDS = frozenset(
     "the a an and or but in on at to of for is are was were be been being "
     "have has had do does did will would could should may might must can "
-    "this that these those with from by as it its we he she they them ".split()
+    "this that these those with from by as it its we he she they them "
+    # Ukrainian stopwords
+    "і та або але що як де коли хто цей ця це ці той та ті мій моя моє "
+    "він вона воно вони ми ви я мене тебе його її нас вас їх це той та "
+    "є був була було були не так ні вже ще теж також тільки навіть якщо "
+    "для між про через після до від над під без при на від у в із з ".split()
 )
 
 
@@ -349,6 +354,8 @@ class PRISMResult:
     compressed_context_len: int
     params: SamplingParams
     speculative_used: bool = False
+    ttft_sec: float = 0.0        # time to first token
+    peak_ram_mb: float = 0.0     # peak RSS during generation
 
 
 # ─── 6. PRISM Engine v2 ──────────────────────────────────────────────────────
@@ -358,6 +365,9 @@ class PRISMEngineV2:
     PRISM v2 wrapper for any MLX model.
     Supports streaming, BM25 compression, dynamic budgets, optional speculative decoding.
     """
+
+    # Adaptive lookahead per tier (longer output → more benefit from speculation)
+    _LOOKAHEAD: dict = {Tier.SIMPLE: 2, Tier.MEDIUM: 4, Tier.COMPLEX: 8}
 
     def __init__(
         self,
@@ -375,6 +385,25 @@ class PRISMEngineV2:
         self.draft_tokenizer = draft_tokenizer
         self.speculative_lookahead = speculative_lookahead
         self.kv_cache = KVCacheManager()
+        self._apply_metal_budget()
+        self._warmup()
+
+    def _apply_metal_budget(self):
+        """Set Metal GPU memory pool to 1 GB — reduces fragmentation on M1 8GB."""
+        try:
+            import mlx.core as mx
+            if hasattr(mx, "metal") and hasattr(mx.metal, "set_cache_limit"):
+                mx.metal.set_cache_limit(1 * 1024 ** 3)
+        except Exception:
+            pass
+
+    def _warmup(self):
+        """Fire a tiny generation to pre-compile Metal shaders; first real request gets normal TTFT."""
+        try:
+            from mlx_lm import generate as mlx_gen
+            mlx_gen(self.model, self.tokenizer, prompt="1", max_tokens=1, verbose=False)
+        except Exception:
+            pass
 
     def generate(self, prompt: str, system_prompt: str = "") -> PRISMResult:
         """Blocking generate — collects streaming output internally."""
@@ -398,46 +427,100 @@ class PRISMEngineV2:
         )
 
     def generate_stream(
-        self, prompt: str, system_prompt: str = ""
+        self,
+        prompt: str,
+        system_prompt: str = "",
+        history: "list[dict] | None" = None,
     ) -> Generator[tuple[str, Optional[PRISMResult]], None, None]:
         """
         Yields (token_str, None) for each token chunk.
         Final yield: ("", PRISMResult) with full metrics.
+        history: list of {"role": "user"/"assistant", "content": str} prior turns.
         """
         from mlx_lm.sample_utils import make_sampler
 
         tier = classify_complexity(prompt)
-        params = _dynamic_budget(prompt, tier, free_ram_gb=self.hw.free_ram_gb)
+        # Live RAM — re-read every request so budget adapts to current system state
+        live_free_ram = psutil.virtual_memory().available / 1024**3
+        params = _dynamic_budget(prompt, tier, free_ram_gb=live_free_ram)
 
-        full_context = f"{system_prompt}\n{prompt}".strip() if system_prompt else prompt
-        original_len = len(full_context)
-        compressed = compress_context(full_context, self.hw.max_context_chars, query=prompt)
-        compressed_len = len(compressed)
+        # Compress only the current user prompt (system + history are short, keep verbatim)
+        original_len = len(prompt)
+        compressed_prompt = compress_context(prompt, self.hw.max_context_chars // 2, query=prompt)
+        compressed_len = len(compressed_prompt)
 
-        sampler = make_sampler(temp=params.temperature, top_p=params.top_p)
+        # Build message list for apply_chat_template
+        messages: list[dict] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        if history:
+            # Sliding window: keep recent turns that fit the context budget
+            budget_chars = self.hw.max_context_chars - compressed_len - 256
+            kept: list[dict] = []
+            used = 0
+            for turn in reversed(history):
+                turn_len = len(turn.get("content", ""))
+                if used + turn_len > budget_chars:
+                    break
+                kept.insert(0, turn)
+                used += turn_len
+            messages.extend(kept)
+        messages.append({"role": "user", "content": compressed_prompt})
+
+        # Apply model-specific chat template (Gemma, Llama3, Mistral, Qwen all supported)
+        if hasattr(self.tokenizer, "apply_chat_template"):
+            try:
+                formatted_prompt = self.tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+            except Exception:
+                formatted_prompt = compressed_prompt
+        else:
+            formatted_prompt = compressed_prompt
+
+        sampler = make_sampler(temp=params.temperature, top_p=params.top_p, min_p=0.05)
         proc = psutil.Process()
+        peak_ram_bytes = proc.memory_info().rss
         gc.collect()
         t0 = time.perf_counter()
+        ttft = 0.0
 
-        # Try speculative decoding for SIMPLE queries when draft model is available
-        if self.draft_model is not None and tier == Tier.SIMPLE:
-            output, spec_used = self._speculative(compressed, params, sampler)
-            elapsed = time.perf_counter() - t0
+        _STOP = ["<|eot_id|>", "<end_of_turn>", "<|im_end|>", "</s>", "<|endoftext|>"]
+
+        # Speculative decoding fires on MEDIUM/COMPLEX (longer output = bigger speedup)
+        if self.draft_model is not None and tier != Tier.SIMPLE:
+            lookahead = self._LOOKAHEAD.get(tier, self.speculative_lookahead)
+            output, spec_used = self._speculative(formatted_prompt, params, sampler, lookahead)
+            ttft = time.perf_counter() - t0
+            elapsed = ttft
             yield output, None
         else:
-            # Try streaming first
             output_parts: list[str] = []
             spec_used = False
             streaming_ok = False
+            first_token = True
             try:
                 from mlx_lm import stream_generate
                 for response in stream_generate(
                     self.model, self.tokenizer,
-                    prompt=compressed,
+                    prompt=formatted_prompt,
                     max_tokens=params.max_tokens,
                     sampler=sampler,
                 ):
                     chunk = response.text
+                    if first_token and chunk:
+                        ttft = time.perf_counter() - t0
+                        first_token = False
+                    cur_rss = proc.memory_info().rss
+                    if cur_rss > peak_ram_bytes:
+                        peak_ram_bytes = cur_rss
+                    # Early-stop on repetition (stop sequences)
+                    if any(s in chunk for s in _STOP):
+                        chunk = chunk.split(_STOP[0])[0]
+                        output_parts.append(chunk)
+                        if chunk:
+                            yield chunk, None
+                        break
                     output_parts.append(chunk)
                     yield chunk, None
                 streaming_ok = True
@@ -448,16 +531,26 @@ class PRISMEngineV2:
                 from mlx_lm import generate as mlx_generate
                 out = mlx_generate(
                     self.model, self.tokenizer,
-                    prompt=compressed,
+                    prompt=formatted_prompt,
                     max_tokens=params.max_tokens,
                     sampler=sampler,
                     verbose=False,
                 )
+                ttft = time.perf_counter() - t0
                 output_parts = [out]
                 yield out, None
 
             output = "".join(output_parts)
             elapsed = time.perf_counter() - t0
+
+        # Peak Metal GPU memory (M1 unified memory insight)
+        try:
+            import mlx.core as mx
+            if hasattr(mx, "metal") and hasattr(mx.metal, "get_peak_memory"):
+                metal_peak = mx.metal.get_peak_memory()
+                peak_ram_bytes = max(peak_ram_bytes, metal_peak)
+        except Exception:
+            pass
 
         ram_mb = proc.memory_info().rss / 1024**2
         tokens = (
@@ -473,6 +566,8 @@ class PRISMEngineV2:
             total_sec=round(elapsed, 3),
             tokens_per_sec=round(tps, 1),
             ram_mb=round(ram_mb, 0),
+            peak_ram_mb=round(peak_ram_bytes / 1024**2, 0),
+            ttft_sec=round(ttft, 3),
             context_compressed=(compressed_len < original_len),
             original_context_len=original_len,
             compressed_context_len=compressed_len,
@@ -481,7 +576,7 @@ class PRISMEngineV2:
         )
 
     def _speculative(
-        self, prompt: str, params: SamplingParams, sampler
+        self, prompt: str, params: SamplingParams, sampler, lookahead: int = 4
     ) -> tuple[str, bool]:
         try:
             from mlx_lm import speculative_generate
@@ -494,7 +589,7 @@ class PRISMEngineV2:
                 max_tokens=params.max_tokens,
                 sampler=sampler,
                 draft_sampler=draft_sampler,
-                num_draft_tokens=self.speculative_lookahead,
+                num_draft_tokens=lookahead,
             )
             return output, True
         except Exception:
