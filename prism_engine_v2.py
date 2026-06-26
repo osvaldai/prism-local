@@ -57,25 +57,40 @@ _COMPARE_RE  = re.compile(r"\b(compare|contrast|difference|better|worse|versus|t
 _MULTI_RE    = re.compile(r"\b(also|additionally|furthermore|step \d|first|second|third|finally)\b", re.I)
 
 
+_ENTITY_RE = re.compile(r"\b[A-Z][a-z]{2,}\b")  # capitalized proper-noun-like words
+
+
 def classify_complexity(text: str) -> Tier:
-    """Multi-feature complexity classifier — no neural net, sub-millisecond."""
+    """
+    Multi-feature complexity classifier — v3.
+    New features: sentence count, entity density, avg word length.
+    No neural net, sub-millisecond.
+    """
     n = len(text)
 
-    if n < 45 and not _DECISION_RE.search(text) and not _ACTION_RE.search(text):
+    if n < 30 and not _DECISION_RE.search(text) and not _ACTION_RE.search(text):
         return Tier.SIMPLE
 
     words = re.findall(r"[\w']+", text.lower())
-    unique_ratio = len(set(words)) / max(len(words), 1)
+    nw = max(len(words), 1)
+    unique_ratio = len(set(words)) / nw
+    avg_word_len = sum(len(w) for w in words) / nw  # longer avg word → more technical
+
+    sent_count = max(len(re.findall(r"[.!?]", text)), 1)
+    entity_density = min(len(_ENTITY_RE.findall(text)) / nw, 0.30)
 
     score = (
         min(n / 280, 0.55)
-        + unique_ratio * 0.12
+        + unique_ratio * 0.10
+        + min((avg_word_len - 3) * 0.02, 0.10)   # technical vocab bonus
+        + min(sent_count * 0.03, 0.12)            # multi-sentence = complex
+        + entity_density * 0.15                   # named entities signal complex domain
         + min(
             bool(_QUESTION_RE.search(text)) * 0.08
             + bool(_NEGATE_RE.search(text))   * 0.06
             + bool(_DECISION_RE.search(text)) * 0.10
             + bool(_ACTION_RE.search(text))   * 0.08
-            + text.count(",") * 0.008
+            + text.count(",") * 0.007
             + text.count(";") * 0.015,
             0.35,
         )
@@ -93,33 +108,46 @@ def classify_complexity(text: str) -> Tier:
     return Tier.COMPLEX
 
 
-def _dynamic_budget(text: str, tier: Tier) -> SamplingParams:
-    """Adjust max_tokens based on prompt content signals."""
+def _dynamic_budget(text: str, tier: Tier, free_ram_gb: float = 99.0) -> SamplingParams:
+    """
+    Adjust max_tokens based on prompt content signals + available RAM.
+    v3: RAM-aware capping prevents OOM on low-memory systems.
+    """
     base = _TIER_BASE[tier]
     n = len(text)
 
     if tier == Tier.SIMPLE:
         max_t = 48 if n < 30 else base.max_tokens
-        return SamplingParams(max_tokens=max_t, temperature=base.temperature, top_p=base.top_p)
-
-    if tier == Tier.MEDIUM:
+    elif tier == Tier.MEDIUM:
         max_t = 768 if _CODE_RE.search(text) else (640 if n > 400 else base.max_tokens)
-        return SamplingParams(max_tokens=max_t, temperature=base.temperature, top_p=base.top_p)
+    else:  # COMPLEX
+        if _CODE_RE.search(text) or _MULTI_RE.search(text):
+            max_t = 1536
+        elif _COMPARE_RE.search(text) or n > 600:
+            max_t = 2048
+        else:
+            max_t = base.max_tokens
 
-    # COMPLEX
-    if _CODE_RE.search(text) or _MULTI_RE.search(text):
-        max_t = 1536
-    elif _COMPARE_RE.search(text) or n > 600:
-        max_t = 2048
-    else:
-        max_t = base.max_tokens
+    # RAM-aware cap: low RAM → tighten budget to avoid swap pressure on KV cache
+    if free_ram_gb < 1.5:
+        max_t = min(max_t, 256)
+    elif free_ram_gb < 3.0:
+        max_t = min(max_t, 512)
+
     return SamplingParams(max_tokens=max_t, temperature=base.temperature, top_p=base.top_p)
 
 
 # ─── 2. BM25 Context Compressor ──────────────────────────────────────────────
 
+_STOPWORDS = frozenset(
+    "the a an and or but in on at to of for is are was were be been being "
+    "have has had do does did will would could should may might must can "
+    "this that these those with from by as it its we he she they them ".split()
+)
+
+
 def _tokenise(text: str) -> list[str]:
-    return [w for w in re.findall(r"[\w']+", text.lower()) if len(w) > 2]
+    return [w for w in re.findall(r"[\w']+", text.lower()) if len(w) > 2 and w not in _STOPWORDS]
 
 
 def _jaccard(a: set, b: set) -> float:
@@ -128,19 +156,44 @@ def _jaccard(a: set, b: set) -> float:
     return len(a & b) / len(a | b)
 
 
+def _split_preserving_code(text: str) -> list[str]:
+    """Split into sentences but keep ```...``` code blocks as single units."""
+    segments: list[str] = []
+    code_block_re = re.compile(r"```.*?```", re.DOTALL)
+    last = 0
+    for m in code_block_re.finditer(text):
+        # sentences before this code block
+        pre = text[last:m.start()]
+        for s in re.split(r"(?<=[.!?\n])\s+", pre):
+            s = s.strip()
+            if s:
+                segments.append(s)
+        # code block as atomic unit
+        block = m.group().strip()
+        if block:
+            segments.append(block)
+        last = m.end()
+    # remaining text after last code block
+    for s in re.split(r"(?<=[.!?\n])\s+", text[last:]):
+        s = s.strip()
+        if s:
+            segments.append(s)
+    return [s for s in segments if len(s) > 8]
+
+
 def compress_context(text: str, target_chars: int, query: str = "") -> str:
     """
-    BM25 extractive sentence selection + Jaccard semantic deduplication.
-    Improvements over v1 TF-IDF:
-      - IDF penalises common words across all sentences
-      - TF saturation (k1/b parameters)
-      - Query-aware scoring
-      - Near-duplicate sentence removal (Jaccard > 0.55)
+    BM25 extractive compression — v3 improvements:
+      - Stopword filtering (faster, better IDF discrimination)
+      - Code block preservation (```blocks``` kept atomic)
+      - Position bonus: first 2 segments get 1.3x score (lead context matters)
+      - BM25 fallback: top-30 TF terms instead of all (O(N*L) → O(N*30))
+      - Jaccard deduplication (sim > 0.55 → skip)
     """
     if len(text) <= target_chars:
         return text
 
-    sents = [s.strip() for s in re.split(r"(?<=[.!?\n])\s+", text) if len(s.strip()) > 8]
+    sents = _split_preserving_code(text)
     if len(sents) <= 2:
         return text[:target_chars]
 
@@ -149,11 +202,19 @@ def compress_context(text: str, target_chars: int, query: str = "") -> str:
     avgdl = sum(len(t) for t in tok_sents) / max(N, 1)
 
     df: dict[str, int] = defaultdict(int)
+    global_tf: dict[str, int] = defaultdict(int)
     for toks in tok_sents:
         for w in set(toks):
             df[w] += 1
+        for w in toks:
+            global_tf[w] += 1
 
-    query_terms = set(_tokenise(query)) if query else {w for t in tok_sents for w in t}
+    if query:
+        query_terms = set(_tokenise(query))
+    else:
+        # Use top-30 most frequent terms as proxy query (faster than all terms)
+        query_terms = {w for w, _ in sorted(global_tf.items(), key=lambda x: -x[1])[:30]}
+
     k1, b = 1.5, 0.75
 
     def bm25(toks: list[str]) -> float:
@@ -174,10 +235,11 @@ def compress_context(text: str, target_chars: int, query: str = "") -> str:
     scored: list[tuple[float, int, str, set]] = []
     for i, (s, toks) in enumerate(zip(sents, tok_sents)):
         sc = bm25(toks)
-        if _DECISION_RE.search(s): sc *= 1.6
-        if _ACTION_RE.search(s):   sc *= 1.4
-        if "?" in s:               sc *= 1.3
-        if _CODE_RE.search(s):     sc *= 1.2
+        if i < 2:                  sc *= 1.30  # position bonus: lead sentences
+        if _DECISION_RE.search(s): sc *= 1.60
+        if _ACTION_RE.search(s):   sc *= 1.40
+        if "?" in s:               sc *= 1.30
+        if _CODE_RE.search(s):     sc *= 1.25  # code blocks are high-signal
         scored.append((sc, i, s, set(toks)))
 
     scored.sort(reverse=True)
@@ -345,7 +407,7 @@ class PRISMEngineV2:
         from mlx_lm.sample_utils import make_sampler
 
         tier = classify_complexity(prompt)
-        params = _dynamic_budget(prompt, tier)
+        params = _dynamic_budget(prompt, tier, free_ram_gb=self.hw.free_ram_gb)
 
         full_context = f"{system_prompt}\n{prompt}".strip() if system_prompt else prompt
         original_len = len(full_context)

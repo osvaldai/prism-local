@@ -188,12 +188,13 @@ class LlamaEngine:
         tier = classify_complexity(prompt)
         params = _dynamic_budget(prompt, tier)
 
-        full_ctx = f"{system_prompt}\n{prompt}".strip() if system_prompt else prompt
-        original_len = len(full_ctx)
-        compressed = compress_context(full_ctx, self.config.n_ctx * 3, query=prompt)
-        compressed_len = len(compressed)
+        # Compress only the USER prompt — system_prompt is added via _format_prompt
+        # (avoids double injection: system_prompt must NOT be included in compress_context input)
+        original_len = len(prompt)
+        compressed_prompt = compress_context(prompt, self.config.n_ctx * 3, query=prompt)
+        compressed_len = len(compressed_prompt)
 
-        formatted = self._format_prompt(compressed, system_prompt)
+        formatted = self._format_prompt(compressed_prompt, system_prompt)
 
         proc = psutil.Process()
         gc.collect()

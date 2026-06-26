@@ -1,42 +1,44 @@
 #!/usr/bin/env python3
 """
-PRISM UI — Terminal chat interface with live metrics.
+PRISM UI v3 — Terminal chat + live system monitoring.
 
-Features:
-  - Model picker: MLX (HuggingFace) or GGUF (local file, supports 70B)
-  - Chat with real-time token streaming
-  - Live metrics: TPS, RAM, tier, compression ratio, speculative flag
-  - System prompt editor
-  - Conversation history
+Fixes vs v2:
+  - MetricsWidget.update() renamed to update_metrics() (shadowed Widget.update)
+  - self._busy set via call_from_thread (was mutated in background thread)
+  - SystemMonitor widget: CPU%, RAM, memory pressure, chip name, TPS history sparkline
 
 Run:
     python prism_ui.py
     python prism_ui.py --model mlx-community/gemma-3-4b-it-4bit
     python prism_ui.py --gguf ./models/llama-70b-q2.gguf
 
-Install deps first:
-    pip install textual
+Install:
+    bash setup_v2.sh
 """
 import argparse
+import platform
+import subprocess
 import threading
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import psutil
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
+from textual.timer import Timer
 from textual.widget import Widget
-from textual.widgets import (
-    Button, Footer, Header, Input, RichLog, Select, Static, TextArea,
-)
+from textual.widgets import Button, Footer, Header, Input, RichLog, Select, Static, TextArea
 from rich.text import Text
 
 from prism_engine_v2 import PRISMResult, Tier, profile_hardware
 
 
-# ─── Model presets ───────────────────────────────────────────────────────────
+# ─── Presets ─────────────────────────────────────────────────────────────────
 
 MLX_PRESETS = [
     ("Gemma 3 4B INT4  — 3.3 GB (recommended)",  "mlx-community/gemma-3-4b-it-4bit"),
@@ -48,6 +50,9 @@ MLX_PRESETS = [
 
 DEFAULT_SYSTEM = "You are a helpful, concise assistant."
 
+# TPS sparkline chars (ascending)
+_SPARK = "▁▂▃▄▅▆▇█"
+
 
 # ─── App state ───────────────────────────────────────────────────────────────
 
@@ -58,9 +63,29 @@ class _State:
     loading: bool = False
     last_result: Optional[PRISMResult] = None
     history: list[dict] = field(default_factory=list)
+    tps_history: deque = field(default_factory=lambda: deque(maxlen=10))
 
 
 _S = _State()
+
+
+# ─── Chip detection ──────────────────────────────────────────────────────────
+
+def _chip_name() -> str:
+    try:
+        r = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            capture_output=True, text=True, timeout=1,
+        )
+        name = r.stdout.strip()
+        if name:
+            return name
+    except Exception:
+        pass
+    return platform.machine()
+
+
+_CHIP = _chip_name()
 
 
 # ─── Background loader ────────────────────────────────────────────────────────
@@ -86,7 +111,6 @@ def _load_thread(mode: str, model_id: str, gguf_path: str, draft_id: str, on_don
 
 APP_CSS = """
 Screen { background: #0d1117; }
-
 Header { background: #161b22; color: #e6edf3; height: 3; }
 Footer { background: #161b22; color: #8b949e; }
 
@@ -101,10 +125,20 @@ Footer { background: #161b22; color: #8b949e; }
 
 #chat-panel { width: 1fr; background: #0d1117; }
 
-#metrics-panel {
-    width: 25;
+#right-panel {
+    width: 28;
     background: #161b22;
     border-left: solid #30363d;
+}
+
+#metrics-panel {
+    height: auto;
+    padding: 1 1;
+    border-bottom: solid #30363d;
+}
+
+#sysmon-panel {
+    height: 1fr;
     padding: 1 1;
 }
 
@@ -147,85 +181,158 @@ Footer { background: #161b22; color: #8b949e; }
 
 .slabel { color: #8b949e; text-style: bold; margin-top: 1; margin-bottom: 1; }
 #status  { color: #f0883e; margin-top: 1; }
-
-#tier-badge  { text-align: center; text-style: bold; margin-bottom: 1; height: 1; }
-.mval        { color: #58a6ff; text-style: bold; }
-.mval-g      { color: #3fb950; text-style: bold; }
-.mval-y      { color: #e3b341; text-style: bold; }
-.mval-r      { color: #f85149; text-style: bold; }
 """
 
 
 # ─── Metrics Widget ───────────────────────────────────────────────────────────
 
 class MetricsWidget(Widget):
-    DEFAULT_CSS = ""
-
     def compose(self) -> ComposeResult:
-        yield Static("[bold #8b949e]── Metrics ──[/]")
-        yield Static("", id="tier-badge")
+        yield Static("[bold #8b949e]── Inference ──[/]")
+        yield Static("[#6e7681 italic]no results yet[/]", id="tier-badge")
         yield Static("", id="m-tps")
         yield Static("", id="m-tokens")
         yield Static("", id="m-time")
         yield Static("", id="m-ram")
         yield Static("", id="m-compress")
         yield Static("", id="m-spec")
-        yield Static("", id="m-hw")
-
-    def on_mount(self):
-        hw = profile_hardware()
-        self.query_one("#m-hw", Static).update(
-            f"[#8b949e]RAM  [/][#58a6ff]{hw.total_ram_gb:.0f}GB[/] "
-            f"[#8b949e]free[/] [#3fb950]{hw.free_ram_gb:.1f}GB[/]"
-        )
-        self.idle()
+        yield Static("", id="m-spark")
 
     def idle(self):
         self.query_one("#tier-badge", Static).update("[#6e7681 italic]awaiting query…[/]")
-        for wid in ("m-tps", "m-tokens", "m-time", "m-ram", "m-compress", "m-spec"):
+        for wid in ("m-tps", "m-tokens", "m-time", "m-ram", "m-compress", "m-spec", "m-spark"):
             self.query_one(f"#{wid}", Static).update("")
 
-    def generating(self):
+    def show_generating(self):
         self.query_one("#tier-badge", Static).update("[#f0883e bold blink]● generating[/]")
 
-    def update(self, r: PRISMResult):  # noqa: A003
+    # Renamed from update() to avoid shadowing Widget.update()
+    def update_metrics(self, r: PRISMResult):
+        _S.tps_history.append(r.tokens_per_sec)
+
         tc = {"simple": "#3fb950", "medium": "#e3b341", "complex": "#f85149"}[r.tier.value]
         self.query_one("#tier-badge", Static).update(f"[{tc} bold] {r.tier.value.upper()} [/]")
 
         tps_c = "#3fb950" if r.tokens_per_sec >= 15 else ("#e3b341" if r.tokens_per_sec >= 5 else "#f85149")
         self.query_one("#m-tps", Static).update(
-            f"[#8b949e]TPS     [/][{tps_c} bold]{r.tokens_per_sec}[/]"
+            f"[#8b949e]TPS      [/][{tps_c} bold]{r.tokens_per_sec}[/]"
         )
-        self.query_one("#m-tokens", Static).update(f"[#8b949e]Tokens  [/][#58a6ff]{r.tokens_generated}[/]")
-        self.query_one("#m-time",   Static).update(f"[#8b949e]Time    [/][#58a6ff]{r.total_sec}s[/]")
+        self.query_one("#m-tokens", Static).update(f"[#8b949e]Tokens   [/][#58a6ff]{r.tokens_generated}[/]")
+        self.query_one("#m-time",   Static).update(f"[#8b949e]Time     [/][#58a6ff]{r.total_sec}s[/]")
+
         ram_c = "#3fb950" if r.ram_mb < 500 else ("#e3b341" if r.ram_mb < 1500 else "#f85149")
-        self.query_one("#m-ram",    Static).update(f"[#8b949e]RAM     [/][{ram_c}]{r.ram_mb:.0f}MB[/]")
+        self.query_one("#m-ram", Static).update(f"[#8b949e]RAM      [/][{ram_c}]{r.ram_mb:.0f}MB[/]")
 
         if r.context_compressed:
             pct = round((1 - r.compressed_context_len / max(r.original_context_len, 1)) * 100)
-            self.query_one("#m-compress", Static).update(f"[#8b949e]Compress[/] [#e3b341]{pct}% saved[/]")
+            self.query_one("#m-compress", Static).update(f"[#8b949e]Compress [/][#e3b341]{pct}% saved[/]")
         else:
-            self.query_one("#m-compress", Static).update("[#8b949e]Compress[/] [#6e7681]–[/]")
+            self.query_one("#m-compress", Static).update("[#8b949e]Compress [/][#6e7681]–[/]")
 
         spec = "[#3fb950]✓ on[/]" if r.speculative_used else "[#6e7681]off[/]"
-        self.query_one("#m-spec", Static).update(f"[#8b949e]Spec    [/]{spec}")
+        self.query_one("#m-spec", Static).update(f"[#8b949e]Spec     [/]{spec}")
 
-        hw = profile_hardware()
-        self.query_one("#m-hw", Static).update(
-            f"[#8b949e]RAM  [/][#58a6ff]{hw.total_ram_gb:.0f}GB[/] "
-            f"[#8b949e]free[/] [#3fb950]{hw.free_ram_gb:.1f}GB[/]"
+        # TPS sparkline
+        if _S.tps_history:
+            mx = max(_S.tps_history) or 1
+            spark = "".join(_SPARK[min(int(v / mx * 7), 7)] for v in _S.tps_history)
+            self.query_one("#m-spark", Static).update(f"[#8b949e]TPS hist [/][#58a6ff]{spark}[/]")
+
+
+# ─── System Monitor Widget ────────────────────────────────────────────────────
+
+class SystemMonitor(Widget):
+    """Live CPU%, RAM, memory pressure, chip info. Updates every 2s."""
+
+    _timer: Optional[Timer] = None
+
+    def compose(self) -> ComposeResult:
+        yield Static("[bold #8b949e]── System ──[/]")
+        yield Static("", id="sm-chip")
+        yield Static("", id="sm-cpu")
+        yield Static("", id="sm-ram")
+        yield Static("", id="sm-pressure")
+        yield Static("", id="sm-cores")
+        yield Static("", id="sm-bat")
+        yield Static("", id="sm-model")
+
+    def on_mount(self):
+        cores_p = psutil.cpu_count(logical=False) or 1
+        cores_l = psutil.cpu_count(logical=True) or cores_p
+        mem = psutil.virtual_memory()
+        self.query_one("#sm-chip", Static).update(
+            f"[#8b949e]Chip  [/][#c9d1d9]{_CHIP}[/]"
+        )
+        self.query_one("#sm-cores", Static).update(
+            f"[#8b949e]Cores [/][#58a6ff]{cores_p}P / {cores_l}L[/]"
+        )
+        self.query_one("#sm-model", Static).update(
+            f"[#8b949e]Model [/][#6e7681]{_S.engine_name or 'none'}[/]"
+        )
+        self._refresh_stats()
+        self._timer = self.set_interval(2.0, self._refresh_stats)
+
+    def _refresh_stats(self):
+        cpu = psutil.cpu_percent(interval=None)
+        mem = psutil.virtual_memory()
+        used_gb = mem.used / 1024**3
+        total_gb = mem.total / 1024**3
+        pct = mem.percent
+
+        # CPU bar
+        cpu_bar_len = int(cpu / 5)  # 20-char bar
+        cpu_bar = "█" * cpu_bar_len + "░" * (20 - cpu_bar_len)
+        cpu_c = "#3fb950" if cpu < 50 else ("#e3b341" if cpu < 80 else "#f85149")
+        self.query_one("#sm-cpu", Static).update(
+            f"[#8b949e]CPU   [/][{cpu_c}]{cpu:5.1f}%[/]"
+        )
+
+        # RAM bar
+        ram_bar_len = int(pct / 5)
+        ram_bar = "█" * ram_bar_len + "░" * (20 - ram_bar_len)
+        ram_c = "#3fb950" if pct < 60 else ("#e3b341" if pct < 85 else "#f85149")
+        self.query_one("#sm-ram", Static).update(
+            f"[#8b949e]RAM   [/][{ram_c}]{used_gb:.1f}[/][#8b949e]/{total_gb:.0f}GB[/]"
+        )
+
+        # Memory pressure label
+        if pct < 60:
+            pressure = ("[#3fb950]● Normal[/]", "#3fb950")
+        elif pct < 80:
+            pressure = ("[#e3b341]● Warning[/]", "#e3b341")
+        else:
+            pressure = ("[#f85149]● Critical — swap active[/]", "#f85149")
+        self.query_one("#sm-pressure", Static).update(
+            f"[#8b949e]Press [/]{pressure[0]}"
+        )
+
+        # Battery (if available)
+        try:
+            bat = psutil.sensors_battery()
+            if bat:
+                plug = "⚡" if bat.power_plugged else "🔋"
+                bat_c = "#3fb950" if bat.percent > 50 else ("#e3b341" if bat.percent > 20 else "#f85149")
+                self.query_one("#sm-bat", Static).update(
+                    f"[#8b949e]Bat   [/][{bat_c}]{bat.percent:.0f}%[/] {plug}"
+                )
+        except Exception:
+            pass
+
+        # Update model name if changed
+        self.query_one("#sm-model", Static).update(
+            f"[#8b949e]Model [/][#c9d1d9]{_S.engine_name or 'none'}[/]"
         )
 
 
-# ─── App ─────────────────────────────────────────────────────────────────────
+# ─── Main App ─────────────────────────────────────────────────────────────────
 
 class PRISMApp(App):
-    TITLE = "PRISM v2  —  Local AI Chat"
+    TITLE = "PRISM v3  —  Local AI Chat"
     CSS = APP_CSS
     BINDINGS = [
         Binding("ctrl+l", "clear_chat", "Clear"),
-        Binding("ctrl+q", "quit", "Quit"),
-        Binding("escape", "refocus", "Focus input"),
+        Binding("ctrl+q", "quit",       "Quit"),
+        Binding("escape", "refocus",    "Focus input"),
     ]
 
     _busy = reactive(False)
@@ -233,15 +340,12 @@ class PRISMApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Horizontal(id="layout"):
-            # ── Sidebar ──────────────────────────────────────────────────────
+            # Sidebar
             with Vertical(id="sidebar"):
-                yield Static("MLX model", classes="slabel")
-                yield Select(
-                    [(lbl, val) for lbl, val in MLX_PRESETS],
-                    id="model-select",
-                    value=MLX_PRESETS[0][1],
-                )
-                yield Static("or GGUF path (70B)", classes="slabel")
+                yield Static("MLX model (HuggingFace)", classes="slabel")
+                yield Select([(lbl, val) for lbl, val in MLX_PRESETS], id="model-select",
+                             value=MLX_PRESETS[0][1])
+                yield Static("or GGUF path (7B–70B):", classes="slabel")
                 yield Input(placeholder="./models/llama-70b-q2.gguf", id="gguf-input")
                 yield Button("Load Model", id="load-btn", variant="primary")
                 yield Static("", id="status")
@@ -249,21 +353,23 @@ class PRISMApp(App):
                 yield TextArea(DEFAULT_SYSTEM, id="sys-prompt")
                 yield Button("Clear Chat", id="clear-btn", variant="error")
 
-            # ── Chat ─────────────────────────────────────────────────────────
+            # Chat
             with Vertical(id="chat-panel"):
                 yield RichLog(id="chat-log", highlight=True, markup=True, wrap=True)
                 with Horizontal(id="input-row"):
                     yield Input(placeholder="Type message… (Enter to send)", id="user-input")
                     yield Button("Send", id="send-btn", variant="success")
 
-            # ── Metrics ──────────────────────────────────────────────────────
-            yield MetricsWidget(id="metrics-panel")
+            # Right panel: metrics + sysmon
+            with Vertical(id="right-panel"):
+                yield MetricsWidget(id="metrics-panel")
+                yield SystemMonitor(id="sysmon-panel")
 
         yield Footer()
 
     def on_mount(self):
         self.query_one("#user-input", Input).focus()
-        self._syslog("[dim]Select a model and click Load to begin.[/]")
+        self._syslog("[dim]Select a model and click Load to begin.[/dim]")
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -284,7 +390,7 @@ class PRISMApp(App):
     def _log_done(self, r: PRISMResult):
         self.query_one("#chat-log", RichLog).write(Text.from_markup(
             f"\n[dim #6e7681]── {r.tier.value} | {r.tokens_per_sec} TPS | "
-            f"{r.total_sec}s | {r.tokens_generated} tok ──[/]\n"
+            f"{r.total_sec}s | {r.tokens_generated} tok ──[/dim]\n"
         ))
 
     # ── Button events ─────────────────────────────────────────────────────────
@@ -304,11 +410,10 @@ class PRISMApp(App):
     # ── Load ─────────────────────────────────────────────────────────────────
 
     def _load(self):
-        if _S.loading or _S.loading:
+        if _S.loading:
             return
         gguf = self.query_one("#gguf-input", Input).value.strip()
         sel  = self.query_one("#model-select", Select).value
-
         mode     = "gguf" if gguf else "mlx"
         model_id = "" if gguf else str(sel)
 
@@ -317,7 +422,7 @@ class PRISMApp(App):
             return
 
         _S.loading = True
-        self.query_one("#status", Static).update("[yellow blink]Loading…[/]")
+        self.query_one("#status", Static).update("[yellow]Loading…[/]")
         self._syslog(f"[yellow]Loading {'GGUF: ' + gguf if gguf else model_id}…[/]")
 
         def done():
@@ -331,14 +436,12 @@ class PRISMApp(App):
 
         def err(e: str):
             self.call_from_thread(
-                lambda: self.query_one("#status", Static).update(f"[red]Error: {e[:35]}[/]")
+                lambda: self.query_one("#status", Static).update(f"[red]{e[:40]}[/]")
             )
             self.call_from_thread(lambda: self._syslog(f"[red]Load error: {e}[/]"))
 
         threading.Thread(
-            target=_load_thread,
-            args=(mode, model_id, gguf, "", done, err),
-            daemon=True,
+            target=_load_thread, args=(mode, model_id, gguf, "", done, err), daemon=True
         ).start()
 
     # ── Send ─────────────────────────────────────────────────────────────────
@@ -349,7 +452,7 @@ class PRISMApp(App):
             return
         if self._busy:
             return
-        inp = self.query_one("#user-input", Input)
+        inp    = self.query_one("#user-input", Input)
         prompt = inp.value.strip()
         if not prompt:
             return
@@ -357,10 +460,8 @@ class PRISMApp(App):
         inp.clear()
         sys_p = self.query_one("#sys-prompt", TextArea).text.strip()
 
-        self._busy = True
-        self.query_one("#send-btn", Button).disabled = True
-        self.query_one("#metrics-panel", MetricsWidget).generating()
-
+        self._set_busy(True)
+        self.query_one("#metrics-panel", MetricsWidget).show_generating()
         _S.history.append({"role": "user", "content": prompt})
         self._log_user(prompt)
         self._log_assistant_start()
@@ -383,24 +484,31 @@ class PRISMApp(App):
                 _S.last_result = final
                 _S.history.append({"role": "assistant", "content": "".join(parts)})
                 self.call_from_thread(self._log_done, final)
-                self.call_from_thread(self.query_one("#metrics-panel", MetricsWidget).update, final)
+                # Use update_metrics (not update) to avoid Widget.update() conflict
+                self.call_from_thread(
+                    self.query_one("#metrics-panel", MetricsWidget).update_metrics, final
+                )
         except Exception as e:
             self.call_from_thread(self._syslog, f"[red]Error: {e}[/]")
         finally:
-            self._busy = False
-            self.call_from_thread(
-                lambda: setattr(self.query_one("#send-btn", Button), "disabled", False)
-            )
+            # Reactive mutation must happen on the main thread
+            self.call_from_thread(self._set_busy, False)
+
+    def _set_busy(self, val: bool):
+        """Must be called from main thread (reactive attribute)."""
+        self._busy = val
+        self.query_one("#send-btn", Button).disabled = val
 
     # ── Clear ─────────────────────────────────────────────────────────────────
 
     def _clear(self):
         _S.history.clear()
+        _S.tps_history.clear()
         if _S.engine and hasattr(_S.engine, "kv_cache"):
             _S.engine.kv_cache.reset()
         self.query_one("#chat-log", RichLog).clear()
         self.query_one("#metrics-panel", MetricsWidget).idle()
-        self._syslog("[dim]Chat cleared.[/]")
+        self._syslog("[dim]Chat cleared.[/dim]")
 
     def action_clear_chat(self): self._clear()
     def action_refocus(self): self.query_one("#user-input", Input).focus()
@@ -409,9 +517,9 @@ class PRISMApp(App):
 # ─── CLI ─────────────────────────────────────────────────────────────────────
 
 def main():
-    ap = argparse.ArgumentParser(description="PRISM v2 Terminal UI")
+    ap = argparse.ArgumentParser(description="PRISM v3 Terminal UI")
     ap.add_argument("--model", default="", help="MLX HuggingFace model ID")
-    ap.add_argument("--gguf",  default="", help="Path to GGUF model file (70B support)")
+    ap.add_argument("--gguf",  default="", help="Path to GGUF file (70B support)")
     ap.add_argument("--draft", default="", help="Draft model for speculative decoding")
     args = ap.parse_args()
 
@@ -419,7 +527,7 @@ def main():
 
     if args.model or args.gguf:
         def auto_load():
-            import time; time.sleep(0.8)
+            time.sleep(0.8)
             _S.loading = True
             mode = "gguf" if args.gguf else "mlx"
 
