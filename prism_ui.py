@@ -121,38 +121,38 @@ def _load_thread(mode: str, model_id: str, gguf_path: str, draft_id: str, on_don
 # ─── CSS ─────────────────────────────────────────────────────────────────────
 
 APP_CSS = """
-Screen { background: #0d1117; }
-Header { background: #161b22; color: #e6edf3; height: 3; }
-Footer { background: #161b22; color: #8b949e; }
+Screen { background: #080b10; }
+Header { background: #0c1120; color: #8a9abb; height: 3; }
+Footer { background: #0a0e18; color: #3a4a62; }
 
 #layout { height: 1fr; }
 
-/* ── Sidebar (Ctrl+B to toggle) ── */
+/* ── Sidebar ── */
 #sidebar {
-    width: 20;
-    min-width: 20;
-    background: #161b22;
-    border-right: solid #30363d;
+    width: 22;
+    min-width: 22;
+    background: #0a0e18;
+    border-right: solid #18243a;
     padding: 1 1;
 }
 #sidebar.hidden { display: none; }
 
-/* ── Chat takes all remaining space ── */
-#chat-panel { width: 1fr; background: #0d1117; }
+/* ── Chat ── */
+#chat-panel { width: 1fr; background: #080b10; }
 
-/* ── Right panel (Ctrl+M to toggle) ── */
+/* ── Right panel ── */
 #right-panel {
-    width: 22;
-    min-width: 22;
-    background: #161b22;
-    border-left: solid #30363d;
+    width: 25;
+    min-width: 25;
+    background: #0a0e18;
+    border-left: solid #18243a;
 }
 #right-panel.hidden { display: none; }
 
 #metrics-panel {
     height: auto;
     padding: 1 1;
-    border-bottom: solid #30363d;
+    border-bottom: solid #18243a;
 }
 
 #sysmon-panel {
@@ -160,48 +160,48 @@ Footer { background: #161b22; color: #8b949e; }
     padding: 1 1;
 }
 
-/* ── Chat log: no border, full height, dark bg ── */
+/* ── Chat log ── */
 #chat-log {
     height: 1fr;
-    background: #010409;
-    padding: 0 2;
+    background: #080b10;
+    padding: 1 3;
     border: none;
 }
 
-/* ── Compact input row ── */
+/* ── Input row ── */
 #input-row {
-    height: 3;
-    background: #161b22;
-    border-top: solid #30363d;
+    height: 4;
+    background: #0c1120;
+    border-top: solid #18243a;
     padding: 0 1;
 }
 
 #user-input {
     width: 1fr;
-    background: #21262d;
-    border: solid #30363d;
-    color: #e6edf3;
-    height: 3;
+    background: #111826;
+    border: solid #1e2d45;
+    color: #c8d4ea;
+    height: 4;
 }
-#user-input:focus { border: solid #58a6ff; }
+#user-input:focus { border: solid #3d7eff; }
 
-#send-btn   { width: 9; background: #238636; color: white; border: none; margin-left: 1; height: 3; }
-#send-btn:hover    { background: #2ea043; }
-#send-btn:disabled { background: #21262d; color: #6e7681; }
+#send-btn   { width: 9; background: #142a50; color: #3d7eff; border: solid #1e3a6a; margin-left: 1; height: 4; }
+#send-btn:hover    { background: #1a3860; }
+#send-btn:disabled { background: #111826; color: #253248; }
 
-#model-select { width: 100%; background: #21262d; border: solid #30363d; color: #e6edf3; margin-bottom: 1; }
-#gguf-input   { width: 100%; background: #21262d; border: solid #30363d; color: #c9d1d9; }
+#model-select { width: 100%; background: #111826; border: solid #1e2d45; color: #8a9abb; margin-bottom: 1; }
+#gguf-input   { width: 100%; background: #111826; border: solid #1e2d45; color: #8a9abb; }
 
-#load-btn  { width: 100%; background: #1f6feb; color: white; border: none; margin-top: 1; }
-#load-btn:hover { background: #388bfd; }
+#load-btn  { width: 100%; background: #142a50; color: #3d7eff; border: none; margin-top: 1; }
+#load-btn:hover { background: #1a3860; }
 
-#clear-btn { width: 100%; background: #6e2020; color: white; border: none; margin-top: 1; }
-#clear-btn:hover { background: #da3633; }
+#clear-btn { width: 100%; background: #2a1010; color: #ff5555; border: none; margin-top: 1; }
+#clear-btn:hover { background: #401818; }
 
-#sys-prompt { height: 5; width: 100%; background: #21262d; border: solid #30363d; color: #c9d1d9; margin-top: 1; }
+#sys-prompt { height: 5; width: 100%; background: #111826; border: solid #1e2d45; color: #8a9abb; margin-top: 1; }
 
-.slabel { color: #8b949e; text-style: bold; margin-top: 1; margin-bottom: 1; }
-#status  { color: #f0883e; margin-top: 1; }
+.slabel { color: #2e4060; text-style: bold; margin-top: 1; margin-bottom: 0; }
+#status  { color: #e8963a; margin-top: 1; }
 """
 
 
@@ -209,71 +209,83 @@ Footer { background: #161b22; color: #8b949e; }
 
 class MetricsWidget(Widget):
     def compose(self) -> ComposeResult:
-        yield Static("[bold #8b949e]── Inference ──[/]")
-        yield Static("[#6e7681 italic]no results yet[/]", id="tier-badge")
+        yield Static("[bold #2e4060]◈ INFERENCE[/]")
+        yield Static("[#253248 italic]awaiting query…[/]", id="tier-badge")
         yield Static("", id="m-tps")
+        yield Static("", id="m-spark")
+        yield Static("", id="m-ttft")
         yield Static("", id="m-tokens")
         yield Static("", id="m-time")
-        yield Static("", id="m-ttft")
+        yield Static("[bold #2e4060]◈ MEMORY[/]", id="m-mem-hdr")
         yield Static("", id="m-ram")
         yield Static("", id="m-peak")
+        yield Static("[bold #2e4060]◈ CONTEXT[/]", id="m-ctx-hdr")
         yield Static("", id="m-compress")
         yield Static("", id="m-spec")
-        yield Static("", id="m-spark")
 
     def idle(self):
-        self.query_one("#tier-badge", Static).update("[#6e7681 italic]awaiting query…[/]")
-        for wid in ("m-tps", "m-tokens", "m-time", "m-ttft", "m-ram", "m-peak",
-                    "m-compress", "m-spec", "m-spark"):
+        self.query_one("#tier-badge", Static).update("[#253248 italic]awaiting query…[/]")
+        for wid in ("m-tps", "m-spark", "m-ttft", "m-tokens", "m-time",
+                    "m-ram", "m-peak", "m-compress", "m-spec"):
             self.query_one(f"#{wid}", Static).update("")
 
     def show_generating(self):
-        self.query_one("#tier-badge", Static).update("[#f0883e bold blink]● generating[/]")
+        self.query_one("#tier-badge", Static).update("[#e8963a bold]⬡ generating…[/]")
 
-    # Renamed from update() to avoid shadowing Widget.update()
     def update_metrics(self, r: PRISMResult):
         _S.tps_history.append(r.tokens_per_sec)
 
-        tc = {"simple": "#3fb950", "medium": "#e3b341", "complex": "#f85149"}[r.tier.value]
-        self.query_one("#tier-badge", Static).update(f"[{tc} bold] {r.tier.value.upper()} [/]")
+        tc = {"simple": "#2dba52", "medium": "#d4a030", "complex": "#e84040"}[r.tier.value]
+        tier_icon = {"simple": "○", "medium": "◑", "complex": "●"}[r.tier.value]
+        self.query_one("#tier-badge", Static).update(
+            f"[{tc} bold]{tier_icon} {r.tier.value.upper()}[/]"
+        )
 
-        tps_c = "#3fb950" if r.tokens_per_sec >= 15 else ("#e3b341" if r.tokens_per_sec >= 5 else "#f85149")
+        tps_c = "#2dba52" if r.tokens_per_sec >= 15 else ("#d4a030" if r.tokens_per_sec >= 5 else "#e84040")
         self.query_one("#m-tps", Static).update(
-            f"[#8b949e]TPS      [/][{tps_c} bold]{r.tokens_per_sec}[/]"
+            f"[#3a4a62]tps  [/][{tps_c} bold]{r.tokens_per_sec:5.1f}[/]"
         )
-        self.query_one("#m-tokens", Static).update(f"[#8b949e]Tokens   [/][#58a6ff]{r.tokens_generated}[/]")
-        self.query_one("#m-time",   Static).update(f"[#8b949e]Time     [/][#58a6ff]{r.total_sec}s[/]")
 
-        ttft_c = "#3fb950" if r.ttft_sec < 0.5 else ("#e3b341" if r.ttft_sec < 2.0 else "#f85149")
+        if _S.tps_history:
+            mx = max(_S.tps_history) or 1
+            spark = "".join(_SPARK[min(int(v / mx * 7), 7)] for v in _S.tps_history)
+            self.query_one("#m-spark", Static).update(f"[#3a4a62]hist [/][#3d7eff]{spark}[/]")
+
+        ttft_c = "#2dba52" if r.ttft_sec < 0.5 else ("#d4a030" if r.ttft_sec < 2.0 else "#e84040")
         self.query_one("#m-ttft", Static).update(
-            f"[#8b949e]TTFT     [/][{ttft_c}]{r.ttft_sec}s[/]"
+            f"[#3a4a62]ttft [/][{ttft_c}]{r.ttft_sec:.2f}s[/]"
         )
+        self.query_one("#m-tokens", Static).update(f"[#3a4a62]tok  [/][#8a9abb]{r.tokens_generated}[/]")
+        self.query_one("#m-time",   Static).update(f"[#3a4a62]time [/][#8a9abb]{r.total_sec}s[/]")
 
-        ram_c = "#3fb950" if r.ram_mb < 500 else ("#e3b341" if r.ram_mb < 1500 else "#f85149")
-        self.query_one("#m-ram", Static).update(f"[#8b949e]RAM      [/][{ram_c}]{r.ram_mb:.0f}MB[/]")
+        ram_c = "#2dba52" if r.ram_mb < 500 else ("#d4a030" if r.ram_mb < 1500 else "#e84040")
+        self.query_one("#m-ram", Static).update(f"[#3a4a62]rss  [/][{ram_c}]{r.ram_mb:.0f}[#3a4a62]MB[/]")
 
-        peak_c = "#3fb950" if r.peak_ram_mb < 800 else ("#e3b341" if r.peak_ram_mb < 2000 else "#f85149")
+        peak_c = "#2dba52" if r.peak_ram_mb < 800 else ("#d4a030" if r.peak_ram_mb < 2000 else "#e84040")
         self.query_one("#m-peak", Static).update(
-            f"[#8b949e]PeakRAM  [/][{peak_c}]{r.peak_ram_mb:.0f}MB[/]"
+            f"[#3a4a62]peak [/][{peak_c}]{r.peak_ram_mb:.0f}[#3a4a62]MB[/]"
         )
 
         if r.context_compressed:
             pct = round((1 - r.compressed_context_len / max(r.original_context_len, 1)) * 100)
-            self.query_one("#m-compress", Static).update(f"[#8b949e]Compress [/][#e3b341]{pct}% saved[/]")
+            self.query_one("#m-compress", Static).update(
+                f"[#3a4a62]cmp  [/][#d4a030]−{pct}%[/]"
+            )
         else:
-            self.query_one("#m-compress", Static).update("[#8b949e]Compress [/][#6e7681]–[/]")
+            self.query_one("#m-compress", Static).update("[#3a4a62]cmp  [/][#253248]none[/]")
 
-        spec = "[#3fb950]✓ on[/]" if r.speculative_used else "[#6e7681]off[/]"
-        self.query_one("#m-spec", Static).update(f"[#8b949e]Spec     [/]{spec}")
-
-        # TPS sparkline
-        if _S.tps_history:
-            mx = max(_S.tps_history) or 1
-            spark = "".join(_SPARK[min(int(v / mx * 7), 7)] for v in _S.tps_history)
-            self.query_one("#m-spark", Static).update(f"[#8b949e]TPS hist [/][#58a6ff]{spark}[/]")
+        spec = "[#2dba52]✓[/]" if r.speculative_used else "[#253248]✗[/]"
+        self.query_one("#m-spec", Static).update(f"[#3a4a62]spec [/]{spec}")
 
 
 # ─── System Monitor Widget ────────────────────────────────────────────────────
+
+def _bar(pct: float, width: int = 12, c_ok="#2dba52", c_warn="#d4a030", c_bad="#e84040") -> str:
+    filled = max(0, min(width, round(pct / 100 * width)))
+    color = c_ok if pct < 60 else (c_warn if pct < 85 else c_bad)
+    bar = "█" * filled + "░" * (width - filled)
+    return f"[{color}]{bar}[/]"
+
 
 class SystemMonitor(Widget):
     """Live CPU%, RAM, memory pressure, chip info. Updates every 2s."""
@@ -281,27 +293,24 @@ class SystemMonitor(Widget):
     _timer: Optional[Timer] = None
 
     def compose(self) -> ComposeResult:
-        yield Static("[bold #8b949e]── System ──[/]")
+        yield Static("[bold #2e4060]◈ SYSTEM[/]")
         yield Static("", id="sm-chip")
+        yield Static("", id="sm-cores")
         yield Static("", id="sm-cpu")
         yield Static("", id="sm-ram")
         yield Static("", id="sm-pressure")
-        yield Static("", id="sm-cores")
         yield Static("", id="sm-bat")
         yield Static("", id="sm-model")
 
     def on_mount(self):
         cores_p = psutil.cpu_count(logical=False) or 1
         cores_l = psutil.cpu_count(logical=True) or cores_p
-        mem = psutil.virtual_memory()
+        chip_short = _CHIP.replace("Apple ", "").split(" ")[0:3]
         self.query_one("#sm-chip", Static).update(
-            f"[#8b949e]Chip  [/][#c9d1d9]{_CHIP}[/]"
+            f"[#3a4a62]chip [/][#8a9abb]{' '.join(chip_short)}[/]"
         )
         self.query_one("#sm-cores", Static).update(
-            f"[#8b949e]Cores [/][#58a6ff]{cores_p}P / {cores_l}L[/]"
-        )
-        self.query_one("#sm-model", Static).update(
-            f"[#8b949e]Model [/][#6e7681]{_S.engine_name or 'none'}[/]"
+            f"[#3a4a62]core [/][#3d7eff]{cores_p}P[/][#3a4a62]+[/][#3d7eff]{cores_l - cores_p}E[/]"
         )
         self._refresh_stats()
         self._timer = self.set_interval(2.0, self._refresh_stats)
@@ -313,55 +322,44 @@ class SystemMonitor(Widget):
         total_gb = mem.total / 1024**3
         pct = mem.percent
 
-        # CPU bar
-        cpu_bar_len = int(cpu / 5)  # 20-char bar
-        cpu_bar = "█" * cpu_bar_len + "░" * (20 - cpu_bar_len)
-        cpu_c = "#3fb950" if cpu < 50 else ("#e3b341" if cpu < 80 else "#f85149")
+        cpu_c = "#2dba52" if cpu < 50 else ("#d4a030" if cpu < 80 else "#e84040")
         self.query_one("#sm-cpu", Static).update(
-            f"[#8b949e]CPU   [/][{cpu_c}]{cpu:5.1f}%[/]"
+            f"[#3a4a62]cpu  [/]{_bar(cpu)} [{cpu_c}]{cpu:4.0f}%[/]"
         )
 
-        # RAM bar
-        ram_bar_len = int(pct / 5)
-        ram_bar = "█" * ram_bar_len + "░" * (20 - ram_bar_len)
-        ram_c = "#3fb950" if pct < 60 else ("#e3b341" if pct < 85 else "#f85149")
+        ram_c = "#2dba52" if pct < 60 else ("#d4a030" if pct < 85 else "#e84040")
         self.query_one("#sm-ram", Static).update(
-            f"[#8b949e]RAM   [/][{ram_c}]{used_gb:.1f}[/][#8b949e]/{total_gb:.0f}GB[/]"
+            f"[#3a4a62]ram  [/]{_bar(pct)} [{ram_c}]{used_gb:.1f}[#3a4a62]G[/]"
         )
 
-        # Memory pressure label
         if pct < 60:
-            pressure = ("[#3fb950]● Normal[/]", "#3fb950")
-        elif pct < 80:
-            pressure = ("[#e3b341]● Warning[/]", "#e3b341")
+            p_txt = "[#2dba52]● ok[/]"
+        elif pct < 85:
+            p_txt = "[#d4a030]● warn[/]"
         else:
-            pressure = ("[#f85149]● Critical — swap active[/]", "#f85149")
-        self.query_one("#sm-pressure", Static).update(
-            f"[#8b949e]Press [/]{pressure[0]}"
-        )
+            p_txt = "[#e84040]● swap![/]"
+        self.query_one("#sm-pressure", Static).update(f"[#3a4a62]     [/]{p_txt}")
 
-        # Battery (if available)
         try:
             bat = psutil.sensors_battery()
             if bat:
-                plug = "⚡" if bat.power_plugged else "🔋"
-                bat_c = "#3fb950" if bat.percent > 50 else ("#e3b341" if bat.percent > 20 else "#f85149")
+                plug = "⚡" if bat.power_plugged else "○"
+                bat_c = "#2dba52" if bat.percent > 50 else ("#d4a030" if bat.percent > 20 else "#e84040")
                 self.query_one("#sm-bat", Static).update(
-                    f"[#8b949e]Bat   [/][{bat_c}]{bat.percent:.0f}%[/] {plug}"
+                    f"[#3a4a62]bat  [/]{_bar(bat.percent)} [{bat_c}]{bat.percent:.0f}%[/]{plug}"
                 )
         except Exception:
             pass
 
-        # Update model name if changed
         self.query_one("#sm-model", Static).update(
-            f"[#8b949e]Model [/][#c9d1d9]{_S.engine_name or 'none'}[/]"
+            f"[#3a4a62]mdl  [/][#8a9abb]{(_S.engine_name or '—')[:16]}[/]"
         )
 
 
 # ─── Main App ─────────────────────────────────────────────────────────────────
 
 class PRISMApp(App):
-    TITLE = "PRISM v3  —  Local AI Chat"
+    TITLE = "⬡ PRISM  ·  Local AI"
     CSS = APP_CSS
     BINDINGS = [
         Binding("ctrl+b", "toggle_sidebar", "Sidebar"),
@@ -378,16 +376,16 @@ class PRISMApp(App):
         with Horizontal(id="layout"):
             # Sidebar
             with Vertical(id="sidebar"):
-                yield Static("MLX model (HuggingFace)", classes="slabel")
+                yield Static("[bold #3a4a62]MLX MODEL[/]", classes="slabel")
                 yield Select([(lbl, val) for lbl, val in MLX_PRESETS], id="model-select",
                              value=MLX_PRESETS[0][1])
-                yield Static("or GGUF path (7B–70B):", classes="slabel")
+                yield Static("[bold #3a4a62]GGUF PATH[/]", classes="slabel")
                 yield Input(placeholder="./models/llama-70b-q2.gguf", id="gguf-input")
-                yield Button("Load Model", id="load-btn", variant="primary")
+                yield Button("⬡ Load Model", id="load-btn", variant="primary")
                 yield Static("", id="status")
-                yield Static("System prompt", classes="slabel")
+                yield Static("[bold #3a4a62]SYSTEM PROMPT[/]", classes="slabel")
                 yield TextArea(DEFAULT_SYSTEM, id="sys-prompt")
-                yield Button("Clear Chat", id="clear-btn", variant="error")
+                yield Button("✕ Clear Chat", id="clear-btn", variant="error")
 
             # Chat
             with Vertical(id="chat-panel"):
@@ -405,28 +403,42 @@ class PRISMApp(App):
 
     def on_mount(self):
         self.query_one("#user-input", Input).focus()
-        self._syslog("[dim]Select a model and click Load to begin.[/dim]")
+        self._syslog("[#18243a]─────────────────────────────────────────────────────────[/]")
+        self._syslog("[#2e4060]  ⬡ PRISM  ·  Progressive Resolution Inference System    [/]")
+        self._syslog("[#253248]  Select a model in the sidebar → Load → start chatting. [/]")
+        self._syslog("[#253248]  Ctrl+B sidebar  ·  Ctrl+M metrics  ·  Ctrl+L clear     [/]")
+        self._syslog("[#18243a]─────────────────────────────────────────────────────────[/]")
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
     def _syslog(self, msg: str):
-        self.query_one("#chat-log", RichLog).write(Text.from_markup(msg))
+        self.query_one("#chat-log", RichLog).write(Text.from_markup(f"[#253248]{msg}[/]"))
 
     def _log_user(self, text: str):
         log = self.query_one("#chat-log", RichLog)
-        log.write(Text.from_markup("\n[bold #58a6ff]You[/]"))
-        log.write(Text(text))
+        log.write(Text.from_markup(
+            "\n[bold #3d7eff]▶ You[/bold #3d7eff]  "
+            "[#1e2d45]─────────────────────────────────────[/]"
+        ))
+        log.write(Text.from_markup(f"[#c8d4ea]  {text}[/]"))
 
     def _log_assistant_start(self):
-        self.query_one("#chat-log", RichLog).write(Text.from_markup("\n[bold #3fb950]Assistant[/]"))
+        self.query_one("#chat-log", RichLog).write(Text.from_markup(
+            "\n[bold #2dba52]◆ PRISM[/bold #2dba52]  "
+            "[#18243a]─────────────────────────────────────[/]"
+        ))
+        self.query_one("#chat-log", RichLog).write(Text.from_markup("  "))
 
     def _log_token(self, tok: str):
         self.query_one("#chat-log", RichLog).write(Text(tok), shrink=False)
 
     def _log_done(self, r: PRISMResult):
+        tier_c = {"simple": "#2dba52", "medium": "#d4a030", "complex": "#e84040"}[r.tier.value]
         self.query_one("#chat-log", RichLog).write(Text.from_markup(
-            f"\n[dim #6e7681]── {r.tier.value} | {r.tokens_per_sec} TPS | "
-            f"{r.total_sec}s | {r.tokens_generated} tok ──[/dim]\n"
+            f"\n  [#18243a]╌╌ [{tier_c}]{r.tier.value}[/] "
+            f"· [#3d7eff]{r.tokens_per_sec}tps[/] "
+            f"· [#8a9abb]{r.total_sec}s[/] "
+            f"· [#3a4a62]{r.tokens_generated}tok[/] ╌╌[/]\n"
         ))
 
     # ── Button events ─────────────────────────────────────────────────────────
