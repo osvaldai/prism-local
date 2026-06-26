@@ -36,7 +36,7 @@ from textual.widget import Widget
 from textual.widgets import Button, Footer, Header, Input, RichLog, Select, Static, TextArea
 from rich.text import Text
 
-from prism_engine_v2 import PRISMResult, Tier, profile_hardware
+from prism_engine_v2 import PRISMResult, Tier, profile_hardware, suggest_model_variant
 
 
 # ─── Presets ─────────────────────────────────────────────────────────────────
@@ -469,6 +469,13 @@ class PRISMApp(App):
             self.query_one("#status", Static).update("[red]Enter a model ID[/]")
             return
 
+        # RAM check — warn before OOM
+        if mode == "mlx":
+            hw = profile_hardware()
+            _, warn = suggest_model_variant(model_id, hw.free_ram_gb)
+            if warn:
+                self._syslog(f"[#d4a030]⚠ {warn}[/]")
+
         _S.loading = True
         self.query_one("#status", Static).update("[yellow]Loading…[/]")
         self._syslog(f"[yellow]Loading {'GGUF: ' + gguf if gguf else model_id}…[/]")
@@ -566,8 +573,8 @@ class PRISMApp(App):
     def _clear(self):
         _S.history.clear()
         _S.tps_history.clear()
-        if _S.engine and hasattr(_S.engine, "kv_cache"):
-            _S.engine.kv_cache.reset()
+        if _S.engine and hasattr(_S.engine, "reset_prompt_cache"):
+            _S.engine.reset_prompt_cache()
         self.query_one("#chat-log", RichLog).clear()
         self.query_one("#metrics-panel", MetricsWidget).idle()
         self._syslog("[dim]Chat cleared.[/dim]")

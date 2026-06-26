@@ -296,36 +296,7 @@ def compress_context(text: str, target_chars: int, query: str = "") -> str:
     return " ".join(s for _, s in selected) or text[:target_chars]
 
 
-# ─── 3. KV-Cache Sliding Window Manager ──────────────────────────────────────
-
-class KVCacheManager:
-    """Anchor + sliding window. Keeps system prefix + recent turns."""
-
-    def __init__(self, max_tokens: int = 2048, anchor_tokens: int = 64):
-        self.max_tokens = max_tokens
-        self.anchor_tokens = anchor_tokens
-        self._history: list[str] = []
-        self._token_count = 0
-
-    def add(self, text: str, tpc: float = 0.25):
-        self._history.append(text)
-        self._token_count += int(len(text) * tpc)
-        self._trim()
-
-    def get_context(self) -> str:
-        return "\n".join(self._history)
-
-    def _trim(self):
-        while self._token_count > self.max_tokens and len(self._history) > 2:
-            removed = self._history.pop(1)
-            self._token_count -= int(len(removed) * 0.25)
-
-    def reset(self):
-        self._history.clear()
-        self._token_count = 0
-
-
-# ─── 4. Hardware Profiler ─────────────────────────────────────────────────────
+# ─── 3. Hardware Profiler ─────────────────────────────────────────────────────
 
 @dataclass
 class HardwareProfile:
@@ -368,7 +339,46 @@ def profile_hardware() -> HardwareProfile:
     )
 
 
-# ─── 5. PRISM Result ─────────────────────────────────────────────────────────
+def suggest_model_variant(model_id: str, free_ram_gb: float) -> tuple[str, str | None]:
+    """
+    Returns (recommended_model_id, warning_message | None).
+    Maps free RAM → safe 4-bit variant. Warns if the requested model may OOM.
+    """
+    _SIZE_GB = {
+        "1b": 0.8, "1B": 0.8,
+        "3b": 2.0, "3B": 2.0,
+        "4b": 2.2, "4B": 2.2,
+        "7b": 4.1, "7B": 4.1,
+        "8b": 4.7, "8B": 4.7,
+        "12b": 6.5, "12B": 6.5,
+        "70b": 19.0, "70B": 19.0,
+    }
+    # Detect approximate size from model_id string
+    model_size_gb = 99.0
+    for key, gb in _SIZE_GB.items():
+        if key in model_id:
+            model_size_gb = gb
+            break
+
+    # Need ~model_size + 1.5GB OS overhead
+    need_gb = model_size_gb + 1.5
+    if free_ram_gb < need_gb:
+        warn = (
+            f"Low RAM: {free_ram_gb:.1f}GB free, model needs ~{need_gb:.0f}GB. "
+            f"Swap likely → very slow. Consider a smaller/more quantized model."
+        )
+        # Suggest best fitting variant
+        if free_ram_gb >= 3.0:
+            fallback = "mlx-community/gemma-3-4b-it-4bit"
+        elif free_ram_gb >= 2.0:
+            fallback = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+        else:
+            fallback = None
+        return (fallback or model_id, warn)
+    return (model_id, None)
+
+
+# ─── 4. PRISM Result ─────────────────────────────────────────────────────────
 
 @dataclass
 class PRISMResult:
@@ -413,8 +423,10 @@ class PRISMEngineV2:
         self.draft_model = draft_model
         self.draft_tokenizer = draft_tokenizer
         self.speculative_lookahead = speculative_lookahead
+        self._prompt_cache: list | None = None
         self._apply_metal_budget()
         self._warmup()
+        self._init_prompt_cache()
 
     def _apply_metal_budget(self):
         """Set Metal GPU memory pool to 1 GB — reduces fragmentation on M1 8GB."""
@@ -432,6 +444,19 @@ class PRISMEngineV2:
             mlx_gen(self.model, self.tokenizer, prompt="1", max_tokens=1, verbose=False)
         except Exception:
             pass
+
+    def _init_prompt_cache(self):
+        """Create LRU prompt cache using mlx_lm's native make_prompt_cache."""
+        try:
+            from mlx_lm.models.cache import make_prompt_cache
+            max_kv = self.hw.max_context_chars // 4  # chars→tokens approximation
+            self._prompt_cache = make_prompt_cache(self.model, max_kv_size=max_kv)
+        except Exception:
+            self._prompt_cache = None
+
+    def reset_prompt_cache(self):
+        """Clear prompt cache (call after chat clear to avoid stale prefix reuse)."""
+        self._init_prompt_cache()
 
     def generate(self, prompt: str, system_prompt: str = "") -> PRISMResult:
         """Blocking generate — collects streaming output internally."""
@@ -515,6 +540,30 @@ class PRISMEngineV2:
             formatted_prompt = compressed_prompt
 
         sampler = make_sampler(temp=params.temperature, top_p=params.top_p, min_p=0.05)
+
+        # KV eviction: bound KV cache size to prevent OOM on long contexts
+        _max_kv = max(512, ctx_chars // 4)  # approx tokens from chars budget
+
+        # KV INT4 quantization for large contexts (4x RAM saving, minor quality trade-off)
+        _kv_bits = 4 if ctx_chars >= 4_000 else None
+
+        # Repetition penalty on COMPLEX tier — prevents runaway loops on long outputs
+        _logits_procs: list = []
+        if tier == Tier.COMPLEX:
+            try:
+                from mlx_lm.sample_utils import make_repetition_penalty
+                _logits_procs.append(make_repetition_penalty(1.15, context_size=20))
+            except Exception:
+                pass
+
+        # Reset Metal peak memory counter for accurate per-request peak
+        try:
+            import mlx.core as mx
+            if hasattr(mx, "metal") and hasattr(mx.metal, "reset_peak_memory"):
+                mx.metal.reset_peak_memory()
+        except Exception:
+            pass
+
         proc = psutil.Process()
         peak_ram_bytes = proc.memory_info().rss
         gc.collect()
@@ -546,6 +595,10 @@ class PRISMEngineV2:
                     prompt=formatted_prompt,
                     max_tokens=params.max_tokens,
                     sampler=sampler,
+                    max_kv_size=_max_kv,
+                    kv_bits=_kv_bits,
+                    prompt_cache=self._prompt_cache,
+                    logits_processors=_logits_procs if _logits_procs else None,
                 ):
                     chunk = response.text
                     if first_token and chunk:
@@ -669,8 +722,14 @@ def load_prism(
     speculative_lookahead: int = 4,
 ) -> PRISMEngineV2:
     from mlx_lm import load
+    import mlx.core as mx
     print(f"Loading: {model_id}")
     model, tokenizer = load(model_id)
+    # JIT-compile model call — ~15-40% TPS boost after first (warm) forward
+    try:
+        model = mx.compile(model)
+    except Exception:
+        pass
     draft_model = draft_tok = None
     if draft_model_id:
         print(f"Loading draft: {draft_model_id}")
