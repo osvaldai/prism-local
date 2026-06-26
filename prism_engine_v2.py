@@ -186,14 +186,23 @@ def _split_preserving_code(text: str) -> list[str]:
     return [s for s in segments if len(s) > 8]
 
 
+def _cosine_sim(a: dict[str, float], b: dict[str, float]) -> float:
+    """TF cosine similarity between two term-frequency dicts."""
+    common = set(a) & set(b)
+    if not common:
+        return 0.0
+    dot = sum(a[w] * b[w] for w in common)
+    na = math.sqrt(sum(v * v for v in a.values()))
+    nb = math.sqrt(sum(v * v for v in b.values()))
+    return dot / (na * nb + 1e-9)
+
+
 def compress_context(text: str, target_chars: int, query: str = "") -> str:
     """
-    BM25 extractive compression — v3 improvements:
-      - Stopword filtering (faster, better IDF discrimination)
-      - Code block preservation (```blocks``` kept atomic)
-      - Position bonus: first 2 segments get 1.3x score (lead context matters)
-      - BM25 fallback: top-30 TF terms instead of all (O(N*L) → O(N*30))
-      - Jaccard deduplication (sim > 0.55 → skip)
+    Two-stage extractive compression — v4:
+      Stage 1: BM25 selects top-60% sentences (relevance + position + signal bonuses)
+      Stage 2: cosine-TF reranks stage-1 candidates against query → final budget fill
+      Also: Jaccard dedup, code block preservation, Ukrainian+English stopwords.
     """
     if len(text) <= target_chars:
         return text
@@ -217,7 +226,6 @@ def compress_context(text: str, target_chars: int, query: str = "") -> str:
     if query:
         query_terms = set(_tokenise(query))
     else:
-        # Use top-30 most frequent terms as proxy query (faster than all terms)
         query_terms = {w for w, _ in sorted(global_tf.items(), key=lambda x: -x[1])[:30]}
 
     k1, b = 1.5, 0.75
@@ -237,25 +245,47 @@ def compress_context(text: str, target_chars: int, query: str = "") -> str:
             s += idf * tf_norm
         return s
 
-    scored: list[tuple[float, int, str, set]] = []
+    # ── Stage 1: BM25 scoring + signal bonuses ────────────────────────────────
+    scored: list[tuple[float, int, str, list[str]]] = []
     for i, (s, toks) in enumerate(zip(sents, tok_sents)):
         sc = bm25(toks)
-        if i < 2:                  sc *= 1.30  # position bonus: lead sentences
+        if i < 2:                  sc *= 1.30
         if _DECISION_RE.search(s): sc *= 1.60
         if _ACTION_RE.search(s):   sc *= 1.40
         if "?" in s:               sc *= 1.30
-        if _CODE_RE.search(s):     sc *= 1.25  # code blocks are high-signal
-        scored.append((sc, i, s, set(toks)))
+        if _CODE_RE.search(s):     sc *= 1.25
+        scored.append((sc, i, s, toks))
 
     scored.sort(reverse=True)
 
+    # Keep top 60% for stage-2 reranking (minimum 4 sentences)
+    top_k = max(4, int(N * 0.60))
+    stage1 = scored[:top_k]
+
+    # ── Stage 2: cosine-TF rerank against query ───────────────────────────────
+    if query_terms:
+        q_tf = {w: 1.0 for w in query_terms}
+        def _rerank_score(toks: list[str]) -> float:
+            s_tf = {}
+            for w in toks:
+                s_tf[w] = s_tf.get(w, 0) + 1
+            return _cosine_sim(q_tf, s_tf)
+
+        stage1 = sorted(
+            stage1,
+            key=lambda x: _rerank_score(x[3]),
+            reverse=True,
+        )
+
+    # ── Fill budget with dedup ────────────────────────────────────────────────
     budget = target_chars
     selected: list[tuple[int, str]] = []
     seen_sets: list[set] = []
 
-    for _sc, idx, s, tok_set in scored:
+    for _sc, idx, s, toks in stage1:
         if budget <= 0:
             break
+        tok_set = set(toks)
         if any(_jaccard(tok_set, prev) > 0.55 for prev in seen_sets):
             continue
         if len(s) <= budget:
@@ -444,9 +474,17 @@ class PRISMEngineV2:
         live_free_ram = psutil.virtual_memory().available / 1024**3
         params = _dynamic_budget(prompt, tier, free_ram_gb=live_free_ram)
 
+        # Dynamic context window: shrink target when RAM is tight
+        if live_free_ram < 1.5:
+            ctx_chars = 2_000
+        elif live_free_ram < 3.0:
+            ctx_chars = 4_000
+        else:
+            ctx_chars = self.hw.max_context_chars
+
         # Compress only the current user prompt (system + history are short, keep verbatim)
         original_len = len(prompt)
-        compressed_prompt = compress_context(prompt, self.hw.max_context_chars // 2, query=prompt)
+        compressed_prompt = compress_context(prompt, ctx_chars // 2, query=prompt)
         compressed_len = len(compressed_prompt)
 
         # Build message list for apply_chat_template
@@ -455,7 +493,7 @@ class PRISMEngineV2:
             messages.append({"role": "system", "content": system_prompt})
         if history:
             # Sliding window: keep recent turns that fit the context budget
-            budget_chars = self.hw.max_context_chars - compressed_len - 256
+            budget_chars = ctx_chars - compressed_len - 256
             kept: list[dict] = []
             used = 0
             for turn in reversed(history):
@@ -486,6 +524,8 @@ class PRISMEngineV2:
         ttft = 0.0
 
         _STOP = ["<|eot_id|>", "<end_of_turn>", "<|im_end|>", "</s>", "<|endoftext|>"]
+        _REP_WINDOW = 60   # chars to check for repetition
+        _REP_MIN_OUT = 200 # don't check until output is this long
 
         # Speculative decoding fires on MEDIUM/COMPLEX (longer output = bigger speedup)
         if self.draft_model is not None and tier != Tier.SIMPLE:
@@ -523,6 +563,12 @@ class PRISMEngineV2:
                         break
                     output_parts.append(chunk)
                     yield chunk, None
+                    # Repetition early-stop: if last 60 chars appear 2+ times → bail
+                    out_so_far = "".join(output_parts)
+                    if len(out_so_far) > _REP_MIN_OUT:
+                        tail = out_so_far[-_REP_WINDOW:]
+                        if out_so_far[:-_REP_WINDOW].count(tail) >= 2:
+                            break
                 streaming_ok = True
             except Exception:
                 pass

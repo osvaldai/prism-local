@@ -8,7 +8,7 @@ import time
 import psutil
 import platform
 from pathlib import Path
-from prism_engine import PRISMEngine, profile_hardware, classify_complexity
+from prism_engine_v2 import PRISMEngine, profile_hardware, classify_complexity
 
 MODELS = [
     {

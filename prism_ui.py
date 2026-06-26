@@ -19,6 +19,7 @@ import argparse
 import platform
 import subprocess
 import threading
+_engine_lock = threading.Lock()
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -94,12 +95,14 @@ def _load_thread(mode: str, model_id: str, gguf_path: str, draft_id: str, on_don
     try:
         if mode == "mlx":
             from prism_engine_v2 import load_prism
-            _S.engine = load_prism(model_id, draft_model_id=draft_id or None)
-            _S.engine_name = model_id.split("/")[-1]
+            with _engine_lock:
+                _S.engine = load_prism(model_id, draft_model_id=draft_id or None)
+                _S.engine_name = model_id.split("/")[-1]
         else:
             from llama_engine import LlamaEngine
-            _S.engine = LlamaEngine(gguf_path)
-            _S.engine_name = Path(gguf_path).name
+            with _engine_lock:
+                _S.engine = LlamaEngine(gguf_path)
+                _S.engine_name = Path(gguf_path).name
         _S.loading = False
         on_done()
     except Exception as e:
@@ -507,7 +510,9 @@ class PRISMApp(App):
                     self.call_from_thread(self._log_token, "".join(_batch))
                     _batch.clear()
 
-            for tok, meta in _S.engine.generate_stream(prompt, sys_p, history=prior_history):
+            with _engine_lock:
+                engine = _S.engine
+            for tok, meta in engine.generate_stream(prompt, sys_p, history=prior_history):
                 if meta is None:
                     parts.append(tok)
                     _batch.append(tok)
