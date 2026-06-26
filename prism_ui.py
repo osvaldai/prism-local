@@ -116,20 +116,27 @@ Footer { background: #161b22; color: #8b949e; }
 
 #layout { height: 1fr; }
 
+/* ── Sidebar (Ctrl+B to toggle) ── */
 #sidebar {
-    width: 30;
+    width: 20;
+    min-width: 20;
     background: #161b22;
     border-right: solid #30363d;
     padding: 1 1;
 }
+#sidebar.hidden { display: none; }
 
+/* ── Chat takes all remaining space ── */
 #chat-panel { width: 1fr; background: #0d1117; }
 
+/* ── Right panel (Ctrl+M to toggle) ── */
 #right-panel {
-    width: 28;
+    width: 22;
+    min-width: 22;
     background: #161b22;
     border-left: solid #30363d;
 }
+#right-panel.hidden { display: none; }
 
 #metrics-panel {
     height: auto;
@@ -142,18 +149,20 @@ Footer { background: #161b22; color: #8b949e; }
     padding: 1 1;
 }
 
+/* ── Chat log: no border, full height, dark bg ── */
 #chat-log {
     height: 1fr;
-    border: solid #21262d;
     background: #010409;
-    padding: 0 1;
+    padding: 0 2;
+    border: none;
 }
 
+/* ── Compact input row ── */
 #input-row {
-    height: 5;
+    height: 3;
     background: #161b22;
     border-top: solid #30363d;
-    padding: 1 1;
+    padding: 0 1;
 }
 
 #user-input {
@@ -161,10 +170,11 @@ Footer { background: #161b22; color: #8b949e; }
     background: #21262d;
     border: solid #30363d;
     color: #e6edf3;
+    height: 3;
 }
 #user-input:focus { border: solid #58a6ff; }
 
-#send-btn   { width: 9; background: #238636; color: white; border: none; margin-left: 1; }
+#send-btn   { width: 9; background: #238636; color: white; border: none; margin-left: 1; height: 3; }
 #send-btn:hover    { background: #2ea043; }
 #send-btn:disabled { background: #21262d; color: #6e7681; }
 
@@ -330,9 +340,11 @@ class PRISMApp(App):
     TITLE = "PRISM v3  —  Local AI Chat"
     CSS = APP_CSS
     BINDINGS = [
-        Binding("ctrl+l", "clear_chat", "Clear"),
-        Binding("ctrl+q", "quit",       "Quit"),
-        Binding("escape", "refocus",    "Focus input"),
+        Binding("ctrl+b", "toggle_sidebar", "Sidebar"),
+        Binding("ctrl+m", "toggle_panels",  "Metrics"),
+        Binding("ctrl+l", "clear_chat",     "Clear"),
+        Binding("ctrl+q", "quit",           "Quit"),
+        Binding("escape", "refocus",        "Input"),
     ]
 
     _busy = reactive(False)
@@ -512,6 +524,14 @@ class PRISMApp(App):
 
     def action_clear_chat(self): self._clear()
     def action_refocus(self): self.query_one("#user-input", Input).focus()
+
+    def action_toggle_sidebar(self):
+        sb = self.query_one("#sidebar")
+        sb.toggle_class("hidden")
+
+    def action_toggle_panels(self):
+        rp = self.query_one("#right-panel")
+        rp.toggle_class("hidden")
 
 
 # ─── CLI ─────────────────────────────────────────────────────────────────────
