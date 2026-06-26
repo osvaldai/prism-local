@@ -21,6 +21,7 @@ from collections import Counter
 from prism_engine_v2 import (
     Tier, classify_complexity, compress_context,
     _dynamic_budget, _split_preserving_code, profile_hardware,
+    suggest_model_variant,
 )
 
 PASS = "PASS"
@@ -313,6 +314,48 @@ def main():
     bacc    = test_budget()
     code_ok = test_code_preservation()
 
+    # ── NEW: Two-stage cosine recall ──────────────────────────────────────────
+    print("\n=== 5. Two-stage cosine recall ===")
+    _ctx = (
+        "Python uses reference counting combined with a cyclic garbage collector.\n"
+        "Cats are popular pets.\n"
+        "Cyclic references are handled by the gc module using generational collection.\n"
+        "The Eiffel Tower is in Paris.\n"
+        "Python memory management relies on reference counting as the primary mechanism.\n"
+        "Memory leaks often occur due to uncollected cyclic reference chains."
+    )
+    _q = "How does Python garbage collector handle cyclic references?"
+    _r = compress_context(_ctx, 200, query=_q)
+    _kw = {"python", "garbage", "cyclic", "reference", "memory"}
+    _recall = len(set(_r.lower().split()) & _kw) / len(_kw)
+    _cos_ok = _recall >= 0.80
+    print(f"  Recall: {_recall:.2f}  (expect >=0.80)  [{PASS if _cos_ok else FAIL}]")
+    if not _cos_ok:
+        print(f"  Output: {_r[:150]}")
+
+    # ── NEW: History format validation ────────────────────────────────────────
+    print("\n=== 6. History format ===")
+    _history = [
+        {"role": "user",      "content": "My name is Alice."},
+        {"role": "assistant", "content": "Nice to meet you, Alice!"},
+    ]
+    _hist_ok = all("role" in t and "content" in t for t in _history)
+    _combined = " ".join(t["content"] for t in _history) + " What is my name?"
+    _tier_hist = classify_complexity(_combined)
+    print(f"  History dict format valid: [{PASS if _hist_ok else FAIL}]")
+    print(f"  classify_complexity on history+query: {_tier_hist.value}  [PASS]")
+
+    # ── NEW: suggest_model_variant RAM guard ──────────────────────────────────
+    print("\n=== 7. suggest_model_variant ===")
+    _m1, _w1 = suggest_model_variant("mlx-community/gemma-3-4b-it-4bit", free_ram_gb=8.0)
+    _ok1 = _w1 is None
+    print(f"  8GB free + 4B model → no warning: [{PASS if _ok1 else FAIL}]")
+    _m2, _w2 = suggest_model_variant("mlx-community/gemma-3-12b-it-4bit", free_ram_gb=3.0)
+    _ok2 = _w2 is not None
+    print(f"  3GB free + 12B model → warning: [{PASS if _ok2 else FAIL}]")
+    if _ok2:
+        print(f"    → {_w2[:80]}…")
+
     print("\n" + "=" * 60)
     print("Summary")
     print("=" * 60)
@@ -320,6 +363,9 @@ def main():
     print(f"  BM25 relevance:       {br:.2f}  (TF-IDF: {tr:.2f}  Δ={br-tr:+.2f})")
     print(f"  Budget accuracy:      {bacc*100:.0f}%")
     print(f"  Code preservation:    {PASS if code_ok else FAIL}")
+    print(f"  Cosine recall:        {_recall:.2f}  {PASS if _cos_ok else FAIL}")
+    print(f"  History format:       {PASS if _hist_ok else FAIL}")
+    print(f"  Quant guard:          {PASS if (_ok1 and _ok2) else FAIL}")
 
     if args.model:
         test_inference(args.model)

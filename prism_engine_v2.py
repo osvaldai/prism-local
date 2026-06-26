@@ -738,5 +738,80 @@ def load_prism(
     return PRISMEngineV2(model, tokenizer, hw, draft_model, draft_tok, speculative_lookahead)
 
 
+# ─── Model Pool (Cascade Routing) ────────────────────────────────────────────
+
+class ModelPool:
+    """
+    Cascade router: classify complexity then route to the optimal-size model.
+    SIMPLE→1B (fast), MEDIUM→4B (balanced), COMPLEX→12B (lazy-load, evict small).
+    Thread-safe via _load_lock.
+    """
+
+    TIER_MODELS: dict = {
+        Tier.SIMPLE:  "mlx-community/gemma-3-1b-it-4bit",
+        Tier.MEDIUM:  "mlx-community/gemma-3-4b-it-4bit",
+        Tier.COMPLEX: "mlx-community/gemma-3-12b-it-4bit",
+    }
+    # Minimum free RAM (GB) needed before loading each tier
+    _TIER_RAM_NEED: dict = {
+        Tier.SIMPLE:  1.5,
+        Tier.MEDIUM:  3.0,
+        Tier.COMPLEX: 7.0,
+    }
+
+    def __init__(self):
+        import threading
+        self._engines: dict = {}
+        self._load_lock = threading.Lock()
+
+    def _evict(self, tier):
+        """Remove engine from pool and run GC to free RAM."""
+        if tier in self._engines:
+            del self._engines[tier]
+            gc.collect()
+
+    def _ensure_ram(self, tier) -> bool:
+        """Evict lower-priority models if needed to free RAM for tier."""
+        hw = profile_hardware()
+        need = self._TIER_RAM_NEED.get(tier, 3.0)
+        if hw.free_ram_gb >= need:
+            return True
+        # Evict in priority order: COMPLEX first (biggest), then others
+        for evict_tier in [Tier.COMPLEX, Tier.MEDIUM, Tier.SIMPLE]:
+            if evict_tier != tier and evict_tier in self._engines:
+                self._evict(evict_tier)
+                hw = profile_hardware()
+                if hw.free_ram_gb >= need:
+                    return True
+        return hw.free_ram_gb >= need
+
+    def get_engine(self, tier) -> "PRISMEngineV2":
+        """Return (possibly cached) engine for tier. Thread-safe."""
+        if tier in self._engines:
+            return self._engines[tier]
+        with self._load_lock:
+            if tier in self._engines:
+                return self._engines[tier]
+            self._ensure_ram(tier)
+            model_id = self.TIER_MODELS[tier]
+            engine = load_prism(model_id)
+            self._engines[tier] = engine
+            return engine
+
+    def generate_stream(
+        self,
+        prompt: str,
+        system_prompt: str = "",
+        history: "list[dict] | None" = None,
+    ):
+        """Classify prompt, route to optimal engine, stream tokens."""
+        tier = classify_complexity(prompt)
+        engine = self.get_engine(tier)
+        yield from engine.generate_stream(prompt, system_prompt, history=history)
+
+    def loaded_tiers(self) -> list:
+        return list(self._engines.keys())
+
+
 # Backwards compat
 PRISMEngine = PRISMEngineV2
