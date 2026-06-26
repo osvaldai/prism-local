@@ -7,14 +7,14 @@ echo "Platform: $(uname -m) | Python: $(python3 --version)"
 echo ""
 
 echo "Installing textual (terminal UI)..."
-pip install "textual>=0.67.0" --quiet
+python3 -m pip install "textual>=0.67.0" --quiet
 
 echo "Installing llama-cpp-python with Metal GPU (70B support)..."
 echo "(Compiles from source — 2-5 min)"
-CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python --upgrade --quiet
+CMAKE_ARGS="-DGGML_METAL=on" python3 -m pip install llama-cpp-python --upgrade --quiet
 
-echo "Installing huggingface_hub CLI..."
-pip install "huggingface_hub[cli]>=0.23" --quiet
+echo "Installing huggingface_hub..."
+python3 -m pip install "huggingface_hub>=0.23" --quiet
 
 echo ""
 echo "=== Verification ==="
@@ -24,7 +24,7 @@ try:
     import llama_cpp; print(f'llama-cpp-python: {llama_cpp.__version__}')
 except Exception as e:
     print(f'llama-cpp-python: WARN — {e}')
-import mlx; print(f'mlx:              {mlx.__version__}')
+import mlx.core as mx; print(f'mlx:              {mx.__version__}')
 import mlx_lm; print(f'mlx-lm:           {mlx_lm.__version__}')
 "
 
